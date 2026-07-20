@@ -1,0 +1,22 @@
+{
+  "name": "qsestimate-backend",
+  "version": "1.0.0",
+  "description": "Backend trung gian cho QsEstimateApp — giữ API key Claude an toàn, gọi AI đọc ảnh/PDF, lưu trữ dữ liệu riêng theo người dùng.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
