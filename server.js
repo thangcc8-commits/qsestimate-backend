@@ -38,7 +38,11 @@ if (!ANTHROPIC_API_KEY) {
   console.error("[FATAL] Thiếu ANTHROPIC_API_KEY trong file .env — server sẽ không gọi được AI cho tới khi anh điền key vào.");
 }
 
-app.use(cors({ origin: ALLOWED_ORIGIN }));
+// CORS: cho phép app (chạy trong Claude.ai artifact hoặc web đã host) gọi tới.
+// Để "*" nghĩa là nhận mọi nguồn — an toàn vì server này chỉ phục vụ app của mình,
+// và API key được giữ kín phía server, không lộ ra ngoài dù nguồn gọi là gì.
+app.use(cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN }));
+app.options("*", cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN })); // trả lời yêu cầu "thăm dò" (preflight) của trình duyệt
 app.use(express.json({ limit: "35mb" })); // đủ chỗ cho ảnh/PDF mã hoá base64 (~26MB file gốc)
 
 // Giới hạn số lượt gọi AI / IP trong 15 phút — tránh bị lạm dụng gọi tràn lan tốn tiền
