@@ -22,7 +22,9 @@
 // Start: npm start -> điền ANTHROPIC_API_KEY + ALLOWED_ORIGIN ở mục Environment).
 // ============================================================================
 
-require("dotenv").config();
+// Lưu ý: KHÔNG require("dotenv") ở đây. Trên Render (và hầu hết hosting), biến môi
+// trường được nạp sẵn tự động nên không cần dotenv. Khi chạy thử ở máy tính cá nhân,
+// nếu muốn dùng file .env thì chạy bằng: node --env-file=.env server.js (Node 20+).
 const express = require("express");
 const cors = require("cors");
 const rateLimit = require("express-rate-limit");
