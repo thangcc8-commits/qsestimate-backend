@@ -165,13 +165,25 @@ app.get("/api/usage-log", (req, res) => {
 
 function extractJsonArray(data) {
   const text = (data.content || []).map((b) => b.text || "").join("");
-  const clean = text.replace(/```json|```/g, "").trim();
+  let clean = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  // Cách 1: thử parse trực tiếp (AI trả JSON thuần)
   try {
     const parsed = JSON.parse(clean);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (e) {
-    throw new Error("AI không trả về JSON hợp lệ — thử lại hoặc dùng ảnh/file khác");
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.items)) return parsed.items; // phòng khi AI trả {items:[...]}
+  } catch (e) { /* rơi xuống cách 2 */ }
+  // Cách 2: AI có viết thêm chữ quanh JSON — tìm đoạn từ dấu [ đầu tiên tới ] cuối cùng
+  const start = clean.indexOf("[");
+  const end = clean.lastIndexOf("]");
+  if (start !== -1 && end !== -1 && end > start) {
+    const slice = clean.slice(start, end + 1);
+    try {
+      const parsed = JSON.parse(slice);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (e) { /* rơi xuống cách 3 */ }
   }
+  // Cách 3: thực sự không có mảng nào -> trả rỗng (không ném lỗi, để app báo "không đọc được hạng mục")
+  return [];
 }
 
 // Đơn giá token của model đang dùng (Claude Sonnet 4.6), USD cho mỗi 1 triệu token.
