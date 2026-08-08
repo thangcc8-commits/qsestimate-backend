@@ -70,7 +70,7 @@ async function callClaude(contentBlocks, betaHeader) {
     headers,
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 2000,
+      max_tokens: 16000,
       messages: [{ role: "user", content: contentBlocks }],
     }),
   });
@@ -170,19 +170,30 @@ function extractJsonArray(data) {
   try {
     const parsed = JSON.parse(clean);
     if (Array.isArray(parsed)) return parsed;
-    if (parsed && Array.isArray(parsed.items)) return parsed.items; // phòng khi AI trả {items:[...]}
+    if (parsed && Array.isArray(parsed.items)) return parsed.items;
   } catch (e) { /* rơi xuống cách 2 */ }
   // Cách 2: AI có viết thêm chữ quanh JSON — tìm đoạn từ dấu [ đầu tiên tới ] cuối cùng
   const start = clean.indexOf("[");
-  const end = clean.lastIndexOf("]");
-  if (start !== -1 && end !== -1 && end > start) {
-    const slice = clean.slice(start, end + 1);
-    try {
-      const parsed = JSON.parse(slice);
-      if (Array.isArray(parsed)) return parsed;
-    } catch (e) { /* rơi xuống cách 3 */ }
+  if (start !== -1) {
+    const end = clean.lastIndexOf("]");
+    if (end > start) {
+      try {
+        const parsed = JSON.parse(clean.slice(start, end + 1));
+        if (Array.isArray(parsed)) return parsed;
+      } catch (e) { /* rơi xuống cách 3 */ }
+    }
+    // Cách 3: phản hồi bị CẮT CỤT giữa chừng (hết max_tokens, không có ] đóng) —
+    // cứu lấy các object hoàn chỉnh cuối cùng thay vì mất trắng toàn bộ kết quả.
+    const arrBody = clean.slice(start + 1); // phần sau dấu [
+    const lastCompleteObjEnd = arrBody.lastIndexOf("}");
+    if (lastCompleteObjEnd !== -1) {
+      const salvaged = "[" + arrBody.slice(0, lastCompleteObjEnd + 1) + "]";
+      try {
+        const parsed = JSON.parse(salvaged);
+        if (Array.isArray(parsed) && parsed.length) return parsed;
+      } catch (e) { /* thật sự hỏng, rơi xuống trả rỗng */ }
+    }
   }
-  // Cách 3: thực sự không có mảng nào -> trả rỗng (không ném lỗi, để app báo "không đọc được hạng mục")
   return [];
 }
 
@@ -206,11 +217,12 @@ function tinhChiPhi(usage, tyGiaVND) {
 }
 
 const TAKEOFF_PROMPT =
-  'Đây là bản vẽ/bảng thống kê xây dựng, có thể nhiều trang. Đọc toàn bộ, tìm bảng khối lượng, ' +
-  "bảng thống kê thép, bảng kích thước cấu kiện, hoặc ghi chú đủ để ước tính khối lượng thi công, " +
-  "rồi trích xuất thành danh sách hạng mục. Nếu không đủ số liệu để bóc khối lượng, trả về mảng rỗng []. " +
-  'Chỉ trả lời bằng JSON thuần, không giải thích, đúng định dạng: [{"name":"tên hạng mục ngắn gọn",' +
-  '"unit":"đơn vị","qty":số,"note":"cơ sở/giả định khi đọc"}]';
+  'Đây là bản vẽ/bảng thống kê xây dựng, có thể nhiều trang/nhiều tầng. Đọc toàn bộ, tìm mọi bảng khối lượng, ' +
+  "bảng thống kê thép, kích thước phòng/cấu kiện, hoặc ghi chú đủ để ước tính khối lượng thi công cho TỪNG hạng mục, " +
+  "rồi trích xuất thành danh sách. Nếu không đủ số liệu để bóc khối lượng, trả về mảng rỗng []. " +
+  'TUYỆT ĐỐI CHỈ trả lời bằng JSON thuần — không viết bất kỳ chữ giải thích, lời dẫn, hay ghi chú nào trước hoặc sau JSON, ' +
+  'không dùng markdown ```. Giữ tên hạng mục và ghi chú thật ngắn gọn để tiết kiệm độ dài phản hồi. ' +
+  'Đúng định dạng: [{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","qty":số,"note":"cơ sở/giả định khi đọc, ngắn gọn"}]';
 
 // ============================================================================
 // POST /api/analyze-image   body: { base64, mediaType }
