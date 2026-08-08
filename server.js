@@ -308,15 +308,15 @@ app.get("/", (req, res) => {
   res.status(404).send("Chưa có index.html — tải index.html + app.bundle.js lên GitHub cùng chỗ với server.js.");
 });
 app.get("/app.bundle.js", (req, res) => {
-  const gz = path.join(__dirname, "app.bundle.js.gz");
   const plain = path.join(__dirname, "app.bundle.js");
+  const gz = path.join(__dirname, "app.bundle.js.gz");
   res.type("application/javascript");
-  // Ưu tiên file nén .gz (nhẹ, up qua điện thoại không treo); nếu không có thì dùng file thường
+  // Ưu tiên file thường (chạy được trên mọi trình duyệt, kể cả điện thoại)
+  if (fs.existsSync(plain)) return res.sendFile(plain);
   if (fs.existsSync(gz)) {
     res.set("Content-Encoding", "gzip");
     return res.sendFile(gz);
   }
-  if (fs.existsSync(plain)) return res.sendFile(plain);
   res.status(404).send("// chưa có app.bundle.js");
 });
 
