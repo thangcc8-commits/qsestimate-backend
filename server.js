@@ -216,24 +216,36 @@ function tinhChiPhi(usage, tyGiaVND) {
   };
 }
 
-const TAKEOFF_PROMPT =
+const TAKEOFF_PROMPT_GOC =
   'Đây là bản vẽ/bảng thống kê xây dựng, có thể nhiều trang/nhiều tầng. Đọc toàn bộ, tìm mọi bảng khối lượng, ' +
   "bảng thống kê thép, kích thước phòng/cấu kiện, hoặc ghi chú đủ để ước tính khối lượng thi công cho TỪNG hạng mục, " +
   "rồi trích xuất thành danh sách. Nếu không đủ số liệu để bóc khối lượng, trả về mảng rỗng []. " +
+  'Với mỗi hạng mục, xếp vào đúng 1 trong 4 nhóm sau (điền vào trường "group"): ' +
+  '"mong" (móng, nền, đào đắp), "khung" (cột/dầm/sàn/cầu thang/kết cấu chịu lực), ' +
+  '"hoanthien" (xây/trát/sơn/ốp lát/trần/cửa/lan can), "mep" (điện/nước/điều hoà/thang máy/PCCC/thiết bị). ' +
   'TUYỆT ĐỐI CHỈ trả lời bằng JSON thuần — không viết bất kỳ chữ giải thích, lời dẫn, hay ghi chú nào trước hoặc sau JSON, ' +
   'không dùng markdown ```. Giữ tên hạng mục và ghi chú thật ngắn gọn để tiết kiệm độ dài phản hồi. ' +
-  'Đúng định dạng: [{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","qty":số,"note":"cơ sở/giả định khi đọc, ngắn gọn"}]';
+  'Đúng định dạng: [{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","qty":số,"group":"mong|khung|hoanthien|mep","note":"cơ sở/giả định khi đọc, ngắn gọn"}]';
+
+// Tạo prompt cho 1 lượt đọc — nếu người dùng có ghi chú bổ sung (VD: "còn thiếu
+// phần cầu thang, đọc kỹ thêm khu vực đó"), gắn thêm vào cuối để AI đọc lại có
+// định hướng, không cần đọc lại từ đầu vô định.
+function taoPrompt(ghiChuThem) {
+  const gc = (ghiChuThem || "").trim();
+  if (!gc) return TAKEOFF_PROMPT_GOC;
+  return TAKEOFF_PROMPT_GOC + `\n\nYÊU CẦU BỔ SUNG TỪ NGƯỜI DÙNG (ưu tiên đọc kỹ theo yêu cầu này): ${gc}`;
+}
 
 // ============================================================================
 // POST /api/analyze-image   body: { base64, mediaType }
 // ============================================================================
 app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { base64, mediaType } = req.body || {};
+    const { base64, mediaType, ghiChuThem } = req.body || {};
     if (!base64 || !mediaType) return res.status(400).json({ error: "Thiếu base64 hoặc mediaType" });
     const data = await callClaude([
       { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-      { type: "text", text: TAKEOFF_PROMPT },
+      { type: "text", text: taoPrompt(ghiChuThem) },
     ]);
     const chiPhi = tinhChiPhi(data.usage);
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "ảnh", ten: req.body?.name || "", ...chiPhi });
@@ -248,12 +260,12 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
 // ============================================================================
 app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { base64 } = req.body || {};
+    const { base64, ghiChuThem } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Thiếu base64" });
     const data = await callClaude(
       [
         { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-        { type: "text", text: TAKEOFF_PROMPT },
+        { type: "text", text: taoPrompt(ghiChuThem) },
       ],
       "pdfs-2024-09-25"
     );
