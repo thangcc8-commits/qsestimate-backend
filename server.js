@@ -217,12 +217,19 @@ function tinhChiPhi(usage, tyGiaVND) {
 }
 
 const TAKEOFF_PROMPT_GOC =
-  'Đây là bản vẽ/bảng thống kê xây dựng, có thể nhiều trang/nhiều tầng. Đọc toàn bộ, tìm mọi bảng khối lượng, ' +
-  "bảng thống kê thép, kích thước phòng/cấu kiện, hoặc ghi chú đủ để ước tính khối lượng thi công cho TỪNG hạng mục, " +
-  "rồi trích xuất thành danh sách. Nếu không đủ số liệu để bóc khối lượng, trả về mảng rỗng []. " +
+  'Đây là bản vẽ/bảng thống kê xây dựng, có thể nhiều trang/nhiều tầng — có thể là bảng khối lượng dạng cột số, ' +
+  'HOẶC mặt bằng kiến trúc chỉ ghi trực tiếp diện tích/kích thước từng phòng (ví dụ chữ "23,90m2" viết ngay trong phòng, ' +
+  'kích thước tường ghi trên trục kích thước, tên phòng như "WC", "Phòng số 1"...). CẢ HAI DẠNG ĐỀU LÀ SỐ LIỆU HỢP LỆ ĐỂ BÓC KHỐI LƯỢNG — ' +
+  'không chỉ giới hạn ở bảng thống kê chính thức. Với mặt bằng kiến trúc: mỗi phòng có ghi diện tích là 1 hạng mục ' +
+  '"Hoàn thiện sàn [tên phòng]" (đơn vị m2, qty = số diện tích ghi trên bản vẽ); nếu đọc được kích thước tường/chu vi phòng, ' +
+  'tính thêm hạng mục xây tường (ghi rõ trong "note" là ước tính từ chu vi, giả định chiều cao tường 3.3m nếu không có số liệu); ' +
+  'WC/phòng có ký hiệu riêng thì tính 1 hạng mục thiết bị vệ sinh theo số lượng phòng đó. ' +
+  'Đọc toàn bộ trang, liệt kê TỪNG hạng mục nhìn thấy được, không gộp chung chung. ' +
+  'CHỈ trả về mảng rỗng [] khi ảnh THỰC SỰ không có bất kỳ số đo/diện tích/kích thước nào đọc được (ảnh mờ, không phải bản vẽ, trang trống) — ' +
+  'không trả rỗng chỉ vì thiếu bảng thống kê dạng cột số chính thức. ' +
   'Với mỗi hạng mục, xếp vào đúng 1 trong 4 nhóm sau (điền vào trường "group"): ' +
   '"mong" (móng, nền, đào đắp), "khung" (cột/dầm/sàn/cầu thang/kết cấu chịu lực), ' +
-  '"hoanthien" (xây/trát/sơn/ốp lát/trần/cửa/lan can), "mep" (điện/nước/điều hoà/thang máy/PCCC/thiết bị). ' +
+  '"hoanthien" (xây/trát/sơn/ốp lát/trần/cửa/lan can/hoàn thiện sàn), "mep" (điện/nước/điều hoà/thang máy/PCCC/thiết bị). ' +
   'TUYỆT ĐỐI CHỈ trả lời bằng JSON thuần — không viết bất kỳ chữ giải thích, lời dẫn, hay ghi chú nào trước hoặc sau JSON, ' +
   'không dùng markdown ```. Giữ tên hạng mục và ghi chú thật ngắn gọn để tiết kiệm độ dài phản hồi. ' +
   'Đúng định dạng: [{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","qty":số,"group":"mong|khung|hoanthien|mep","note":"cơ sở/giả định khi đọc, ngắn gọn"}]';
