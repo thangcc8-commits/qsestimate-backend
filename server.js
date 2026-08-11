@@ -45,7 +45,7 @@ if (!ANTHROPIC_API_KEY) {
 // và API key được giữ kín phía server, không lộ ra ngoài dù nguồn gọi là gì.
 app.use(cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN }));
 app.options("*", cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN })); // trả lời yêu cầu "thăm dò" (preflight) của trình duyệt
-app.use(express.json({ limit: "35mb" })); // đủ chỗ cho ảnh/PDF mã hoá base64 (~26MB file gốc)
+app.use(express.json({ limit: "40mb" })); // dư địa an toàn — trần thật nằm ở phía Anthropic (32MB), không phải ở đây
 
 // Giới hạn số lượt gọi AI / IP trong 15 phút — tránh bị lạm dụng gọi tràn lan tốn tiền
 const aiLimiter = rateLimit({
