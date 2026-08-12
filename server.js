@@ -286,13 +286,12 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
 
 // ============================================================================
 // LƯU TRỮ RIÊNG — thay cho window.storage / localStorage, lưu thật trên server
-// theo từng người dùng. Nhận diện người dùng qua header "x-user-id" — frontend
-// tự sinh 1 mã ngẫu nhiên, lưu vào localStorage của trình duyệt, gửi kèm mỗi
-// request. LƯU Ý: đây CHƯA phải hệ thống đăng nhập/xác thực thật — chỉ đủ để
-// mỗi máy/mỗi trình duyệt có 1 kho dữ liệu riêng, không lẫn với người khác.
-// Muốn dùng rộng rãi nhiều người an toàn hơn thì cần thêm đăng nhập thật
-// (email/mật khẩu hoặc OAuth) và đổi từ file JSON sang database thật
-// (Postgres/MySQL/SQLite) — phần này chỉ là bản đơn giản để chạy được ngay.
+// theo từng người dùng. ƯU TIÊN nhận diện qua MÃ ĐĂNG NHẬP (x-access-code) khi
+// công ty đã bật phân quyền (CO_PHAN_QUYEN) — vì mã này chú TỰ GÕ, ổn định qua
+// mọi trình duyệt/thiết bị, không bị mất khi trình duyệt xoá bộ nhớ tạm. Chỉ khi
+// CHƯA bật phân quyền mới rơi về "x-user-id" (mã ngẫu nhiên máy tự sinh, KÉM ổn
+// định — dễ mất khi trình duyệt xoá localStorage, ví dụ khi bấm back/thoát app
+// trên di động — đây từng là nguyên nhân gây mất dữ liệu khi tưởng đã lưu).
 // ============================================================================
 const DATA_DIR = path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
@@ -302,10 +301,18 @@ function userFile(userId) {
   return path.join(DATA_DIR, `${safe || "anonymous"}.json`);
 }
 
+function dinhDanhLuuTru(req) {
+  if (CO_PHAN_QUYEN) {
+    const ma = (req.header("x-access-code") || "").trim();
+    const ten = ACCESS_CODES[ma];
+    if (ten) return `acc_${ten}`; // định danh ổn định theo mã đăng nhập thật
+  }
+  return req.header("x-user-id") || "anonymous"; // rơi về mã máy khi chưa bật phân quyền
+}
+
 app.get("/api/storage/:key", (req, res) => {
   try {
-    const userId = req.header("x-user-id") || "anonymous";
-    const file = userFile(userId);
+    const file = userFile(dinhDanhLuuTru(req));
     if (!fs.existsSync(file)) return res.json({ value: null });
     const store = JSON.parse(fs.readFileSync(file, "utf8") || "{}");
     res.json({ value: store[req.params.key] ?? null });
@@ -316,8 +323,7 @@ app.get("/api/storage/:key", (req, res) => {
 
 app.post("/api/storage/:key", (req, res) => {
   try {
-    const userId = req.header("x-user-id") || "anonymous";
-    const file = userFile(userId);
+    const file = userFile(dinhDanhLuuTru(req));
     const store = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8") || "{}") : {};
     store[req.params.key] = req.body?.value ?? null;
     fs.writeFileSync(file, JSON.stringify(store));
