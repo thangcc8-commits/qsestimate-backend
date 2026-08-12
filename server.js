@@ -234,13 +234,23 @@ const TAKEOFF_PROMPT_GOC =
   'không dùng markdown ```. Giữ tên hạng mục và ghi chú thật ngắn gọn để tiết kiệm độ dài phản hồi. ' +
   'Đúng định dạng: [{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","qty":số,"group":"mong|khung|hoanthien|mep","note":"cơ sở/giả định khi đọc, ngắn gọn"}]';
 
-// Tạo prompt cho 1 lượt đọc — nếu người dùng có ghi chú bổ sung (VD: "còn thiếu
-// phần cầu thang, đọc kỹ thêm khu vực đó"), gắn thêm vào cuối để AI đọc lại có
-// định hướng, không cần đọc lại từ đầu vô định.
-function taoPrompt(ghiChuThem) {
+// Tạo prompt cho 1 lượt đọc.
+// - ghiChuThem: người dùng gõ tay yêu cầu bổ sung (VD: "còn thiếu cầu thang").
+// - danhSachChuan: danh sách TÊN đầu việc lấy từ mẫu dự toán đã lưu của ĐÚNG nhóm
+//   công trình (nhà phố/shophouse/...) — khi có, AI được yêu cầu ưu tiên khớp số
+//   liệu đọc được vào đúng các đầu việc này thay vì tự đặt tên mới tự do, để kết
+//   quả bám sát cấu trúc dự toán chuẩn công ty đã lập sẵn (và nhờ vậy tự động có
+//   đơn giá thật từ định mức đã khớp, không rơi vào định mức mới giá 0đ).
+function taoPrompt(ghiChuThem, danhSachChuan) {
+  let p = TAKEOFF_PROMPT_GOC;
+  if (Array.isArray(danhSachChuan) && danhSachChuan.length) {
+    p += `\n\nCÔNG TY ĐÃ CÓ SẴN DANH SÁCH ĐẦU VIỆC CHUẨN cho loại công trình này (từ mẫu dự toán đã lập trước):\n` +
+      danhSachChuan.map((t) => `- ${t}`).join("\n") +
+      `\n\nƯU TIÊN TUYỆT ĐỐI: với mỗi số liệu đọc được từ bản vẽ, đặt "name" trong JSON trả về TRÙNG KHỚP CHÍNH XÁC (nguyên văn, không đổi chữ) với 1 tên trong danh sách trên nếu nó cùng loại công việc — kể cả khi cách gọi trên bản vẽ khác đi (ví dụ bản vẽ ghi "BT móng M250" nhưng danh sách có "Bê tông móng đá 1x2 mác 250" thì dùng đúng tên trong danh sách). Chỉ đặt tên mới hoàn toàn KHÁC danh sách khi thực sự không có đầu việc nào trong danh sách phù hợp với số liệu đọc được.`;
+  }
   const gc = (ghiChuThem || "").trim();
-  if (!gc) return TAKEOFF_PROMPT_GOC;
-  return TAKEOFF_PROMPT_GOC + `\n\nYÊU CẦU BỔ SUNG TỪ NGƯỜI DÙNG (ưu tiên đọc kỹ theo yêu cầu này): ${gc}`;
+  if (gc) p += `\n\nYÊU CẦU BỔ SUNG TỪ NGƯỜI DÙNG (ưu tiên đọc kỹ theo yêu cầu này): ${gc}`;
+  return p;
 }
 
 // ============================================================================
@@ -248,14 +258,43 @@ function taoPrompt(ghiChuThem) {
 // ============================================================================
 app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { base64, mediaType, ghiChuThem } = req.body || {};
+    const { base64, mediaType, ghiChuThem, danhSachChuan } = req.body || {};
     if (!base64 || !mediaType) return res.status(400).json({ error: "Thiếu base64 hoặc mediaType" });
     const data = await callClaude([
       { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-      { type: "text", text: taoPrompt(ghiChuThem) },
+      { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan) },
     ]);
     const chiPhi = tinhChiPhi(data.usage);
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "ảnh", ten: req.body?.name || "", ...chiPhi });
+    res.json({ items: extractJsonArray(data), cost: chiPhi });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// ============================================================================
+// POST /api/analyze-images-batch   body: { images:[{base64,mediaType,name}], ghiChuThem, danhSachChuan }
+// ----------------------------------------------------------------------------
+// Đọc NHIỀU ảnh trong CÙNG 1 lượt gọi AI — để AI thấy được toàn bộ các trang
+// cùng lúc và đối chiếu chéo giữa chúng (VD: phòng lặp lại ở nhiều tầng, không
+// tính trùng), giống hệt cách đọc trực tiếp trong khung chat. Gọi riêng từng ảnh
+// một (endpoint /api/analyze-image ở trên) khiến AI không biết các ảnh liên quan
+// nhau, kết quả thiếu và rời rạc hơn hẳn — đây là lý do được yêu cầu bổ sung.
+// ============================================================================
+app.post("/api/analyze-images-batch", aiLimiter, batBuocDangNhap, async (req, res) => {
+  try {
+    const { images, ghiChuThem, danhSachChuan } = req.body || {};
+    if (!Array.isArray(images) || !images.length) return res.status(400).json({ error: "Thiếu danh sách ảnh" });
+    if (images.length > 20) return res.status(400).json({ error: "Tối đa 20 ảnh mỗi lượt đọc gộp." });
+    const contentBlocks = images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.base64 } }));
+    const ghiChuGop = (ghiChuThem || "") +
+      `\n\n(Lưu ý: đây là ${images.length} trang/ảnh THUỘC CÙNG 1 BỘ bản vẽ — đọc và đối chiếu chéo giữa các trang, ` +
+      `không tính trùng 1 hạng mục xuất hiện ở nhiều trang, gộp thành đúng số lượng thật của toàn bộ công trình.)`;
+    contentBlocks.push({ type: "text", text: taoPrompt(ghiChuGop, danhSachChuan) });
+    const data = await callClaude(contentBlocks);
+    const chiPhi = tinhChiPhi(data.usage);
+    const tenGop = images.map((i) => i.name || "?").join(", ");
+    ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: `${images.length} ảnh gộp`, ten: tenGop, ...chiPhi });
     res.json({ items: extractJsonArray(data), cost: chiPhi });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
@@ -267,12 +306,12 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
 // ============================================================================
 app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { base64, ghiChuThem } = req.body || {};
+    const { base64, ghiChuThem, danhSachChuan } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Thiếu base64" });
     const data = await callClaude(
       [
         { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-        { type: "text", text: taoPrompt(ghiChuThem) },
+        { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan) },
       ],
       "pdfs-2024-09-25"
     );
