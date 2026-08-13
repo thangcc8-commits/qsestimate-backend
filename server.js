@@ -244,9 +244,14 @@ const TAKEOFF_PROMPT_GOC =
 function taoPrompt(ghiChuThem, danhSachChuan) {
   let p = TAKEOFF_PROMPT_GOC;
   if (Array.isArray(danhSachChuan) && danhSachChuan.length) {
-    p += `\n\nCÔNG TY ĐÃ CÓ SẴN DANH SÁCH ĐẦU VIỆC CHUẨN cho loại công trình này (từ mẫu dự toán đã lập trước):\n` +
-      danhSachChuan.map((t) => `- ${t}`).join("\n") +
-      `\n\nƯU TIÊN TUYỆT ĐỐI: với mỗi số liệu đọc được từ bản vẽ, đặt "name" trong JSON trả về TRÙNG KHỚP CHÍNH XÁC (nguyên văn, không đổi chữ) với 1 tên trong danh sách trên nếu nó cùng loại công việc — kể cả khi cách gọi trên bản vẽ khác đi (ví dụ bản vẽ ghi "BT móng M250" nhưng danh sách có "Bê tông móng đá 1x2 mác 250" thì dùng đúng tên trong danh sách). Chỉ đặt tên mới hoàn toàn KHÁC danh sách khi thực sự không có đầu việc nào trong danh sách phù hợp với số liệu đọc được.`;
+    p += `\n\nCÔNG TY ĐÃ CÓ SẴN DANH SÁCH ${danhSachChuan.length} ĐẦU VIỆC CHUẨN cho loại công trình này (từ mẫu dự toán đầy đủ đã lập trước — đây là mẫu THẬT, ĐẦY ĐỦ mà công ty dùng cho công trình cùng loại):\n` +
+      danhSachChuan.map((t, i) => `${i + 1}. ${t}`).join("\n") +
+      `\n\nNHIỆM VỤ BẮT BUỘC — RÀ QUA TỪNG ĐẦU VIỆC TRONG DANH SÁCH TRÊN, LẦN LƯỢT TỪ 1 ĐẾN ${danhSachChuan.length}, KHÔNG BỎ SÓT ĐẦU VIỆC NÀO:\n` +
+      `Với MỖI đầu việc trong danh sách, kiểm tra kỹ toàn bộ (các) trang bản vẽ xem có số liệu/kích thước/ghi chú nào liên quan không. ` +
+      `Nếu CÓ đủ căn cứ để tính (dù phải suy luận từ kích thước/diện tích ghi trên bản vẽ) → thêm 1 dòng vào kết quả, "name" ghi ĐÚNG NGUYÊN VĂN tên trong danh sách trên. ` +
+      `Nếu KHÔNG tìm thấy căn cứ nào cho đầu việc đó trên (các) trang bản vẽ hiện có → BỎ QUA đầu việc đó (không thêm vào kết quả, không bịa số) — nhưng vẫn phải kiểm tra hết toàn bộ danh sách trước khi kết luận, không dừng sớm. ` +
+      `Đây là bộ bản vẽ thật của 1 công trình đầy đủ — nếu danh sách mẫu có ${danhSachChuan.length} đầu việc mà kết quả trả về chỉ vài dòng, gần như chắc chắn bạn đã BỎ SÓT chứ không phải bản vẽ thiếu dữ liệu — hãy xem lại kỹ hơn trước khi kết luận thiếu. ` +
+      `Sau danh sách chuẩn, NẾU còn thấy số liệu rõ ràng trên bản vẽ mà KHÔNG khớp đầu việc nào trong danh sách, vẫn thêm vào kết quả với tên mới phù hợp (đừng bỏ sót số liệu chỉ vì không có sẵn tên).`;
   }
   const gc = (ghiChuThem || "").trim();
   if (gc) p += `\n\nYÊU CẦU BỔ SUNG TỪ NGƯỜI DÙNG (ưu tiên đọc kỹ theo yêu cầu này): ${gc}`;
