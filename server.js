@@ -34,6 +34,10 @@ const zlib = require("zlib");
 const app = express();
 const PORT = process.env.PORT || 3001;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+// Model đọc từ biến môi trường — không khoá cứng trong code (mục 23 đặc tả: không
+// khoá AutoEngine vào 1 phiên bản/nhà cung cấp cố định). Đổi model sau này chỉ cần
+// sửa biến ANTHROPIC_MODEL trên Render → khởi động lại, KHÔNG cần sửa code/deploy lại.
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*"; // đổi thành đúng domain app khi deploy thật, đừng để "*"
 
 if (!ANTHROPIC_API_KEY) {
@@ -57,6 +61,14 @@ const aiLimiter = rateLimit({
 // ============================================================================
 // GỌI CLAUDE API — dùng chung cho cả đọc ảnh và đọc PDF
 // ============================================================================
+// ============================================================================
+// GỌI CLAUDE API — dùng chung cho cả đọc ảnh và đọc PDF. Có thử lại GIỚI HẠN
+// (tối đa 2 lần, KHÔNG vô hạn) khi lỗi thật sự TẠM THỜI — mất mạng, quá tải máy
+// chủ Anthropic (429/500/502/503/504). KHÔNG thử lại với lỗi CHẮC CHẮN sai (sai
+// định dạng request, hết tiền, sai key, quá dung lượng...) — thử lại những lỗi
+// đó chỉ tốn thêm tiền vô ích vì chắc chắn lại thất bại y hệt.
+// ============================================================================
+const MA_LOI_TAM_THOI = new Set([429, 500, 502, 503, 504]);
 async function callClaude(contentBlocks, betaHeader) {
   const headers = {
     "Content-Type": "application/json",
@@ -64,31 +76,47 @@ async function callClaude(contentBlocks, betaHeader) {
     "anthropic-version": "2023-06-01",
   };
   if (betaHeader) headers["anthropic-beta"] = betaHeader;
+  const body = JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 16000, messages: [{ role: "user", content: contentBlocks }] });
 
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 16000,
-      messages: [{ role: "user", content: contentBlocks }],
-    }),
-  });
+  const SO_LAN_TOI_DA = 3; // 1 lần gốc + tối đa 2 lần thử lại
+  let loiCuoi;
+  for (let lan = 1; lan <= SO_LAN_TOI_DA; lan++) {
+    let resp;
+    try {
+      resp = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body });
+    } catch (netErr) {
+      // Lỗi mạng thật (đứt kết nối, timeout) — tạm thời, đáng thử lại
+      loiCuoi = netErr;
+      if (lan < SO_LAN_TOI_DA) { await new Promise((r) => setTimeout(r, 1000 * lan)); continue; }
+      const err = new Error(`Không kết nối được tới Claude API sau ${SO_LAN_TOI_DA} lần thử: ${netErr.message}`);
+      err.status = 503;
+      throw err;
+    }
 
-  let data;
-  try {
-    data = await resp.json();
-  } catch (e) {
-    const err = new Error(`Máy chủ Claude trả về dữ liệu không hợp lệ (HTTP ${resp.status})`);
-    err.status = 502;
-    throw err;
-  }
-  if (!resp.ok) {
+    let data;
+    try {
+      data = await resp.json();
+    } catch (e) {
+      const err = new Error(`Máy chủ Claude trả về dữ liệu không hợp lệ (HTTP ${resp.status})`);
+      err.status = 502;
+      throw err;
+    }
+
+    if (resp.ok) return data;
+
+    if (MA_LOI_TAM_THOI.has(resp.status) && lan < SO_LAN_TOI_DA) {
+      // Lỗi tạm thời (quá tải/rate-limit phía Anthropic) — chờ rồi thử lại, không
+      // báo lỗi ngay cho người dùng.
+      await new Promise((r) => setTimeout(r, 1000 * lan));
+      continue;
+    }
+    // Lỗi chắc chắn sai (400/401/413...) hoặc đã hết lượt thử lại — báo lỗi ngay,
+    // không thử thêm vì thử lại cũng sẽ thất bại y hệt, chỉ tốn thêm tiền.
     const err = new Error(data?.error?.message || `Lỗi HTTP ${resp.status} từ Claude API`);
     err.status = resp.status;
     throw err;
   }
-  return data;
+  throw loiCuoi || new Error("Không gọi được Claude API.");
 }
 
 // ============================================================================
@@ -271,7 +299,7 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
     ]);
     const chiPhi = tinhChiPhi(data.usage);
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "ảnh", ten: req.body?.name || "", ...chiPhi });
-    res.json({ items: extractJsonArray(data), cost: chiPhi });
+    res.json({ items: extractJsonArray(data), cost: chiPhi, model: ANTHROPIC_MODEL });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -300,7 +328,7 @@ app.post("/api/analyze-images-batch", aiLimiter, batBuocDangNhap, async (req, re
     const chiPhi = tinhChiPhi(data.usage);
     const tenGop = images.map((i) => i.name || "?").join(", ");
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: `${images.length} ảnh gộp`, ten: tenGop, ...chiPhi });
-    res.json({ items: extractJsonArray(data), cost: chiPhi });
+    res.json({ items: extractJsonArray(data), cost: chiPhi, model: ANTHROPIC_MODEL });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -322,7 +350,7 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
     );
     const chiPhi = tinhChiPhi(data.usage);
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "PDF", ten: req.body?.name || "", ...chiPhi });
-    res.json({ items: extractJsonArray(data), cost: chiPhi });
+    res.json({ items: extractJsonArray(data), cost: chiPhi, model: ANTHROPIC_MODEL });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -404,7 +432,7 @@ app.get("/app.bundle.js", (req, res) => {
 // ============================================================================
 // Health check — để dịch vụ hosting (Render/Railway...) biết server còn sống
 // ============================================================================
-app.get("/health", (req, res) => res.json({ status: "ok", hasApiKey: !!ANTHROPIC_API_KEY }));
+app.get("/health", (req, res) => res.json({ status: "ok", hasApiKey: !!ANTHROPIC_API_KEY, model: ANTHROPIC_MODEL }));
 
 app.listen(PORT, () => {
   console.log(`QsEstimate backend đang chạy ở cổng ${PORT}`);
