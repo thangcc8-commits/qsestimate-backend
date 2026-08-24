@@ -197,8 +197,8 @@ function extractJsonArray(data) {
   // Cách 1: thử parse trực tiếp (AI trả JSON thuần)
   try {
     const parsed = JSON.parse(clean);
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && Array.isArray(parsed.items)) return parsed.items;
+    if (Array.isArray(parsed)) return locHangMucHopLe(parsed);
+    if (parsed && Array.isArray(parsed.items)) return locHangMucHopLe(parsed.items);
   } catch (e) { /* rơi xuống cách 2 */ }
   // Cách 2: AI có viết thêm chữ quanh JSON — tìm đoạn từ dấu [ đầu tiên tới ] cuối cùng
   const start = clean.indexOf("[");
@@ -207,7 +207,7 @@ function extractJsonArray(data) {
     if (end > start) {
       try {
         const parsed = JSON.parse(clean.slice(start, end + 1));
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) return locHangMucHopLe(parsed);
       } catch (e) { /* rơi xuống cách 3 */ }
     }
     // Cách 3: phản hồi bị CẮT CỤT giữa chừng (hết max_tokens, không có ] đóng) —
@@ -218,24 +218,48 @@ function extractJsonArray(data) {
       const salvaged = "[" + arrBody.slice(0, lastCompleteObjEnd + 1) + "]";
       try {
         const parsed = JSON.parse(salvaged);
-        if (Array.isArray(parsed) && parsed.length) return parsed;
+        if (Array.isArray(parsed) && parsed.length) return locHangMucHopLe(parsed);
       } catch (e) { /* thật sự hỏng, rơi xuống trả rỗng */ }
     }
   }
   return [];
 }
 
-// Đơn giá token của model đang dùng (Claude Sonnet 4.6), USD cho mỗi 1 triệu token.
-// Nguồn: trang giá chính thức của Anthropic — xem lại tại https://claude.com/pricing
-// nếu Anthropic thay đổi giá thì sửa 2 số dưới đây cho khớp.
-const GIA_INPUT_USD_PER_MTOK = 3;
-const GIA_OUTPUT_USD_PER_MTOK = 15;
+// VALIDATE toàn bộ hạng mục AI trả về TRƯỚC KHI gửi cho app ghi vào state (mục 2
+// yêu cầu) — loại bỏ dòng rác: thiếu tên, khối lượng âm/NaN, đơn vị rỗng, group
+// không hợp lệ. Không sửa/bịa giá trị — chỉ LOẠI những dòng rõ ràng hỏng, giữ
+// nguyên các dòng hợp lệ. Đây là lưới an toàn cuối cùng trước khi dữ liệu vào app.
+const NHOM_HOP_LE = new Set(["mong", "khung", "hoanthien", "mep"]);
+function locHangMucHopLe(danhSach) {
+  return danhSach.filter((item) => {
+    if (!item || typeof item !== "object") return false;
+    if (typeof item.name !== "string" || !item.name.trim()) return false;
+    const qty = Number(item.qty);
+    if (!Number.isFinite(qty) || qty < 0) return false; // chặn khối lượng âm/NaN ngay từ backend
+    if (item.group != null && !NHOM_HOP_LE.has(item.group)) item.group = undefined; // group lạ -> để trống, không chặn cả dòng
+    return true;
+  });
+}
 
-// Tính chi phí của 1 lần gọi AI, trả về cả token lẫn tiền (USD và VNĐ ước tính)
-function tinhChiPhi(usage, tyGiaVND) {
+// Đơn giá token USD/1 triệu token — theo TỪNG HÃNG (khác nhau rất nhiều, không
+// dùng chung 1 giá được). Nguồn: trang giá chính thức từng hãng, cập nhật
+// 24/08/2026 — giá AI đổi liên tục, kiểm tra lại nếu thấy lệch nhiều so với hoá
+// đơn thật. Gemini có bản miễn phí — nếu đang dùng free tier thì usd thực tế = 0
+// dù công thức dưới vẫn tính ra 1 số (chỉ mang tính tham khảo).
+const GIA_THEO_HANG = {
+  claude: { input: 3, output: 15, nguon: "claude.com/pricing" },
+  openai: { input: 2.5, output: 10, nguon: "openai.com/api/pricing (gpt-4o)" },
+  gemini: { input: 1.25, output: 5, nguon: "ai.google.dev/pricing (gemini-1.5-pro) — CÓ bản miễn phí, kiểm tra tài khoản Google trước khi tin số này" },
+};
+
+// Tính chi phí của 1 lần gọi AI, trả về cả token lẫn tiền (USD và VNĐ ước tính).
+// "hang" xác định dùng đúng bảng giá của hãng nào — mặc định "claude" để không
+// đổi hành vi cũ nếu không truyền vào.
+function tinhChiPhi(usage, tyGiaVND, hang) {
+  const gia = GIA_THEO_HANG[hang] || GIA_THEO_HANG.claude;
   const inTok = usage?.input_tokens || 0;
   const outTok = usage?.output_tokens || 0;
-  const usd = (inTok / 1e6) * GIA_INPUT_USD_PER_MTOK + (outTok / 1e6) * GIA_OUTPUT_USD_PER_MTOK;
+  const usd = (inTok / 1e6) * gia.input + (outTok / 1e6) * gia.output;
   return {
     inputTokens: inTok,
     outputTokens: outTok,
@@ -258,9 +282,19 @@ const TAKEOFF_PROMPT_GOC =
   'Với mỗi hạng mục, xếp vào đúng 1 trong 4 nhóm sau (điền vào trường "group"): ' +
   '"mong" (móng, nền, đào đắp), "khung" (cột/dầm/sàn/cầu thang/kết cấu chịu lực), ' +
   '"hoanthien" (xây/trát/sơn/ốp lát/trần/cửa/lan can/hoàn thiện sàn), "mep" (điện/nước/điều hoà/thang máy/PCCC/thiết bị). ' +
+  'BẮT BUỘC TỰ KIỂM CHỨNG (không cần dữ liệu công trình khác — chỉ đối chiếu NGAY TRONG bộ bản vẽ đang đọc): ' +
+  'trường "note" của MỌI hạng mục PHẢI ghi rõ CÔNG THỨC TÍNH kèm số liệu cụ thể lấy từ đâu trên bản vẽ (VD "5m dài x 3m cao - 2m2 cửa = 13m2", ' +
+  'hoặc "đọc trực tiếp số 23.90m2 ghi trong phòng"), KHÔNG được chỉ ghi 1 câu mô tả chung chung không có số. ' +
+  'Nếu bản vẽ có ghi tổng diện tích sàn/công trình ở đâu đó (VD tiêu đề, bảng chỉ tiêu), SAU KHI liệt kê xong toàn bộ phòng, ' +
+  'tự cộng lại tổng diện tích các phòng đã liệt kê và so với con số tổng đó — nếu lệch quá 10%, thêm 1 hạng mục cuối tên ' +
+  '"CẢNH BÁO ĐỐI CHIẾU NỘI BỘ" (group "hoanthien", qty 0) ghi rõ trong note 2 con số lệch nhau bao nhiêu, để người kiểm tra biết cần xem lại. ' +
   'TUYỆT ĐỐI CHỈ trả lời bằng JSON thuần — không viết bất kỳ chữ giải thích, lời dẫn, hay ghi chú nào trước hoặc sau JSON, ' +
-  'không dùng markdown ```. Giữ tên hạng mục và ghi chú thật ngắn gọn để tiết kiệm độ dài phản hồi. ' +
-  'Đúng định dạng: [{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","qty":số,"group":"mong|khung|hoanthien|mep","note":"cơ sở/giả định khi đọc, ngắn gọn"}]';
+  'không dùng markdown ```. Tên hạng mục ngắn gọn, nhưng "note" phải đủ công thức+số liệu như yêu cầu trên (không cắt ngắn note). ' +
+  'TRƯỚC KHI TRẢ LỜI — TỰ RÀ SOÁT LẠI TOÀN BỘ DANH SÁCH 1 LẦN: nếu có 2 hạng mục cùng tên (hoặc cùng ý nghĩa, chỉ khác cách gọi) ' +
+  'xuất hiện ở nhiều trang khác nhau NHƯNG THỰC RA LÀ CÙNG 1 CẤU KIỆN (VD tường được nhìn thấy lặp lại ở mặt bằng và mặt cắt của CÙNG 1 vị trí) ' +
+  '→ CHỈ giữ 1 dòng duy nhất, không liệt kê trùng. Ngược lại, nếu là các cấu kiện THỰC SỰ khác nhau dù trùng tên (VD "Xây tường Phòng 1" và ' +
+  '"Xây tường Phòng 2" là 2 tường khác nhau dù cùng loại công tác) thì giữ nguyên riêng biệt, không gộp nhầm. ' +
+  'Đúng định dạng: [{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","qty":số,"group":"mong|khung|hoanthien|mep","note":"CÔNG THỨC + số liệu cụ thể"}]';
 
 // Tạo prompt cho 1 lượt đọc.
 // - ghiChuThem: người dùng gõ tay yêu cầu bổ sung (VD: "còn thiếu cầu thang").
@@ -291,15 +325,16 @@ function taoPrompt(ghiChuThem, danhSachChuan) {
 // ============================================================================
 app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { base64, mediaType, ghiChuThem, danhSachChuan } = req.body || {};
+    const { base64, mediaType, ghiChuThem, danhSachChuan, provider } = req.body || {};
     if (!base64 || !mediaType) return res.status(400).json({ error: "Thiếu base64 hoặc mediaType" });
-    const data = await callClaude([
+    const data = await callUnifiedAI([
       { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
       { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan) },
-    ]);
-    const chiPhi = tinhChiPhi(data.usage);
+    ], undefined, provider);
+    const hangDaDung = provider || AI_PROVIDER;
+    const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "ảnh", ten: req.body?.name || "", ...chiPhi });
-    res.json({ items: extractJsonArray(data), cost: chiPhi, model: ANTHROPIC_MODEL });
+    res.json({ items: extractJsonArray(data), cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -316,19 +351,27 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
 // ============================================================================
 app.post("/api/analyze-images-batch", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { images, ghiChuThem, danhSachChuan } = req.body || {};
+    const { images, ghiChuThem, danhSachChuan, provider } = req.body || {};
     if (!Array.isArray(images) || !images.length) return res.status(400).json({ error: "Thiếu danh sách ảnh" });
     if (images.length > 20) return res.status(400).json({ error: "Tối đa 20 ảnh mỗi lượt đọc gộp." });
     const contentBlocks = images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.base64 } }));
     const ghiChuGop = (ghiChuThem || "") +
-      `\n\n(Lưu ý: đây là ${images.length} trang/ảnh THUỘC CÙNG 1 BỘ bản vẽ — đọc và đối chiếu chéo giữa các trang, ` +
-      `không tính trùng 1 hạng mục xuất hiện ở nhiều trang, gộp thành đúng số lượng thật của toàn bộ công trình.)`;
+      `\n\n(Lưu ý: đây là ${images.length} trang/ảnh THUỘC CÙNG 1 BỘ bản vẽ — đọc và đối chiếu chéo giữa các trang. ` +
+      `PHÂN BIỆT RÕ 2 trường hợp: (1) CÙNG 1 cấu kiện nhìn thấy ở NHIỀU GÓC/NHIỀU LOẠI BẢN VẼ của CÙNG 1 tầng ` +
+      `(VD tường xuất hiện cả ở mặt bằng lẫn mặt cắt của tầng 1) → chỉ tính 1 lần, KHÔNG trùng. (2) CÙNG LOẠI hạng mục ` +
+      `lặp lại ở NHIỀU TẦNG KHÁC NHAU (VD "Hoàn thiện sàn" xuất hiện ở cả tầng 1, tầng 2, tầng 3...) → TUYỆT ĐỐI KHÔNG được ` +
+      `cộng dồn thành 1 số duy nhất cho cả công trình — PHẢI tách thành TỪNG DÒNG RIÊNG cho MỖI TẦNG, ghi rõ số tầng ngay ` +
+      `trong "name" (VD "Hoàn thiện sàn – Tầng 1", "Hoàn thiện sàn – Tầng 2"...), để kỹ sư QS đối chiếu được TỪNG DÒNG với ` +
+      `ĐÚNG trang bản vẽ của tầng đó — không đưa 1 con số gộp mà không ai kiểm tra lại được đúng/sai từ đâu.)`;
     contentBlocks.push({ type: "text", text: taoPrompt(ghiChuGop, danhSachChuan) });
-    const data = await callClaude(contentBlocks);
-    const chiPhi = tinhChiPhi(data.usage);
+    // Cho phép đổi hãng AI NGAY TRONG 1 lần gọi (không cần đổi biến môi trường +
+    // deploy lại) — để so sánh trực tiếp Claude vs Gemini trên CÙNG 1 bộ ảnh.
+    const data = await callUnifiedAI(contentBlocks, undefined, provider);
+    const hangDaDung = provider || AI_PROVIDER;
+    const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
     const tenGop = images.map((i) => i.name || "?").join(", ");
-    ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: `${images.length} ảnh gộp`, ten: tenGop, ...chiPhi });
-    res.json({ items: extractJsonArray(data), cost: chiPhi, model: ANTHROPIC_MODEL });
+    ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: `${images.length} ảnh gộp (${hangDaDung})`, ten: tenGop, ...chiPhi });
+    res.json({ items: extractJsonArray(data), cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -336,6 +379,11 @@ app.post("/api/analyze-images-batch", aiLimiter, batBuocDangNhap, async (req, re
 
 // ============================================================================
 // POST /api/analyze-pdf   body: { base64 }
+// KHÔNG dùng callUnifiedAI ở đây — endpoint này dùng khối "document" (đặc thù
+// của Claude, cần header beta riêng). Bộ chuyển đổi OpenAI/Gemini hiện chỉ xử
+// lý được "text" và "image" — nếu đổi sang hãng khác, nội dung PDF sẽ ÂM THẦM
+// BỊ RỚT MẤT (thành chữ rỗng) mà không báo lỗi gì. Giữ nguyên callClaude cho
+// tới khi viết thêm phần chuyển đổi PDF riêng cho từng hãng.
 // ============================================================================
 app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
@@ -348,7 +396,7 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
       ],
       "pdfs-2024-09-25"
     );
-    const chiPhi = tinhChiPhi(data.usage);
+    const chiPhi = tinhChiPhi(data.usage, undefined, "claude");
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "PDF", ten: req.body?.name || "", ...chiPhi });
     res.json({ items: extractJsonArray(data), cost: chiPhi, model: ANTHROPIC_MODEL });
   } catch (e) {
@@ -433,6 +481,81 @@ app.get("/app.bundle.js", (req, res) => {
 // Health check — để dịch vụ hosting (Render/Railway...) biết server còn sống
 // ============================================================================
 app.get("/health", (req, res) => res.json({ status: "ok", hasApiKey: !!ANTHROPIC_API_KEY, model: ANTHROPIC_MODEL }));
+
+// ============================================================================
+// AI PROVIDER ADAPTER (mục 23) — gọi được Gemini/OpenAI thay vì chỉ Claude.
+// CHƯA TEST được bằng key thật (không có OPENAI_API_KEY/GEMINI_API_KEY thật để
+// gọi thử) — cấu trúc contentBlocks đã kiểm chứng khớp đúng với cách server
+// đang gửi cho Claude. Đã VÁ 1 lỗi crash tiềm ẩn: nếu Gemini trả về response
+// không có "candidates" (VD lỗi/bị chặn nội dung), code gốc sẽ crash ngay tại
+// data.candidates[0] — giờ có kiểm tra trước, báo lỗi rõ ràng thay vì crash.
+// Mặc định AI_PROVIDER="claude" — không đổi hành vi hiện tại nếu không set.
+// ============================================================================
+const AI_PROVIDER = process.env.AI_PROVIDER || "claude";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+async function callUnifiedAI(contentBlocks, betaHeader, providerOverride) {
+  const provider = providerOverride || AI_PROVIDER;
+
+  if (provider === "openai" && OPENAI_API_KEY) {
+    const messages = [{
+      role: "user",
+      content: contentBlocks.map((block) => {
+        if (block.type === "text") return { type: "text", text: block.text };
+        if (block.type === "image") return { type: "image_url", image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` } };
+        return { type: "text", text: "" };
+      }),
+    }];
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({ model: process.env.OPENAI_MODEL || "gpt-4o", messages, max_tokens: 16000 }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`OpenAI Error HTTP ${resp.status}: ${data?.error?.message || "không rõ nguyên nhân"}`);
+    // Vá: kiểm tra choices tồn tại trước khi đọc — tránh crash nếu OpenAI trả
+    // response bất thường (VD bị content filter chặn, không có choices).
+    if (!data.choices || !data.choices[0]) throw new Error("OpenAI trả về phản hồi không có nội dung (có thể bị chặn bởi bộ lọc nội dung)");
+    return {
+      content: [{ text: data.choices[0]?.message?.content || "" }],
+      usage: { input_tokens: data.usage?.prompt_tokens || 0, output_tokens: data.usage?.completion_tokens || 0 },
+    };
+  }
+
+  if (provider === "gemini" && GEMINI_API_KEY) {
+    const contents = [{
+      parts: contentBlocks.map((block) => {
+        if (block.type === "text") return { text: block.text };
+        if (block.type === "image") return { inline_data: { mime_type: block.source.media_type, data: block.source.data } };
+        return { text: "" };
+      }),
+    }];
+    const modelName = process.env.GEMINI_MODEL || "gemini-1.5-pro";
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`Gemini Error HTTP ${resp.status}: ${data?.error?.message || "không rõ nguyên nhân"}`);
+    // Vá lỗi crash tìm ra tuần trước: data.candidates có thể undefined nếu
+    // Gemini chặn nội dung (safety filter) hoặc lỗi khác — kiểm tra trước khi
+    // đọc data.candidates[0], không để crash ngay tại chỗ đọc index.
+    if (!data.candidates || !data.candidates.length) {
+      const lyDo = data?.promptFeedback?.blockReason || "không rõ nguyên nhân";
+      throw new Error(`Gemini không trả về kết quả (candidates rỗng) — lý do: ${lyDo}`);
+    }
+    const textOut = data.candidates[0]?.content?.parts?.map((p) => p.text).join("") || "";
+    return {
+      content: [{ text: textOut }],
+      usage: { input_tokens: data.usageMetadata?.promptTokenCount || 0, output_tokens: data.usageMetadata?.candidatesTokenCount || 0 },
+    };
+  }
+
+  // Mặc định hoặc chưa cấu hình key hãng khác -> dùng Claude như hiện tại
+  return await callClaude(contentBlocks, betaHeader);
+}
 
 app.listen(PORT, () => {
   console.log(`QsEstimate backend đang chạy ở cổng ${PORT}`);
