@@ -263,46 +263,54 @@ function ghiNhatKy(ban) {
 
 // Ai đang đăng nhập — app gọi để kiểm tra mã có hợp lệ không
 app.get("/api/whoami", async (req, res) => {
-  if (!CO_PHAN_QUYEN) return res.json({ ten: "khách", quanTri: false, coPhanQuyen: false });
-  const u = await layNguoiDung(req);
-  if (!u) return res.status(401).json({ error: "Mã truy cập không đúng." });
-  res.json({ ...u, coPhanQuyen: true });
+  try {
+    if (!CO_PHAN_QUYEN) return res.json({ ten: "khách", quanTri: false, coPhanQuyen: false });
+    const u = await layNguoiDung(req);
+    if (!u) return res.status(401).json({ error: "Mã truy cập không đúng." });
+    res.json({ ...u, coPhanQuyen: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // Nhật ký sử dụng — chỉ người quản trị xem được
 app.get("/api/usage-log", async (req, res) => {
-  if (CO_PHAN_QUYEN) {
-    const u = await layNguoiDung(req);
-    if (!u || !u.quanTri) return res.status(403).json({ error: "Chỉ người quản trị mới xem được nhật ký." });
-  }
-  // SỬA LỖI (giống bug /api/backup từng tìm ra): trước đây endpoint này LUÔN
-  // đọc file JSON local, dù Postgres đang active và ghiNhatKy() đã ghi log vào
-  // đó — nghĩa là chú sẽ KHÔNG thấy log thật khi dùng Postgres. Giờ đọc đúng
-  // nguồn đang active, tự rơi về file nếu Postgres lỗi.
-  let log;
-  if (pgStore && process.env.DATABASE_URL) {
-    try {
-      const rows = await pgStore.docNhatKyDb(200);
-      log = rows.map((r) => ({
-        luc: r.luc, nguoi: r.nguoi, loai: r.loai, ten: r.ten,
-        inputTokens: r.input_tokens, outputTokens: r.output_tokens,
-        usd: Number(r.usd) || 0, vnd: Number(r.vnd) || 0,
-      }));
-    } catch (e) {
-      console.error("[Postgres] đọc nhật ký lỗi, rơi về file:", e.message);
+  try {
+    if (CO_PHAN_QUYEN) {
+      const u = await layNguoiDung(req);
+      if (!u || !u.quanTri) return res.status(403).json({ error: "Chỉ người quản trị mới xem được nhật ký." });
+    }
+    // SỬA LỖI (giống bug /api/backup từng tìm ra): trước đây endpoint này LUÔN
+    // đọc file JSON local, dù Postgres đang active và ghiNhatKy() đã ghi log vào
+    // đó — nghĩa là chú sẽ KHÔNG thấy log thật khi dùng Postgres. Giờ đọc đúng
+    // nguồn đang active, tự rơi về file nếu Postgres lỗi.
+    let log;
+    if (pgStore && process.env.DATABASE_URL) {
+      try {
+        const rows = await pgStore.docNhatKyDb(200);
+        log = rows.map((r) => ({
+          luc: r.luc, nguoi: r.nguoi, loai: r.loai, ten: r.ten,
+          inputTokens: r.input_tokens, outputTokens: r.output_tokens,
+          usd: Number(r.usd) || 0, vnd: Number(r.vnd) || 0,
+        }));
+      } catch (e) {
+        console.error("[Postgres] đọc nhật ký lỗi, rơi về file:", e.message);
+        log = docNhatKy();
+      }
+    } else {
       log = docNhatKy();
     }
-  } else {
-    log = docNhatKy();
+    const tong = {};
+    log.forEach((b) => {
+      if (!tong[b.nguoi]) tong[b.nguoi] = { soLan: 0, vnd: 0, usd: 0 };
+      tong[b.nguoi].soLan++;
+      tong[b.nguoi].vnd += b.vnd || 0;
+      tong[b.nguoi].usd = +(tong[b.nguoi].usd + (b.usd || 0)).toFixed(5);
+    });
+    res.json({ log: log.slice(0, 200), tongTheoNguoi: tong, tongSoLan: log.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  const tong = {};
-  log.forEach((b) => {
-    if (!tong[b.nguoi]) tong[b.nguoi] = { soLan: 0, vnd: 0, usd: 0 };
-    tong[b.nguoi].soLan++;
-    tong[b.nguoi].vnd += b.vnd || 0;
-    tong[b.nguoi].usd = +(tong[b.nguoi].usd + (b.usd || 0)).toFixed(5);
-  });
-  res.json({ log: log.slice(0, 200), tongTheoNguoi: tong, tongSoLan: log.length });
 });
 
 // ============================================================================
@@ -1266,29 +1274,40 @@ function doiChieuToanCuc(cacLo) {
 async function xuLyJobNen(jobId) {
   const job = docJob(jobId);
   if (!job) return;
+  const SO_LAN_THU_LO = 3; // 1 lần gốc + 2 lần thử lại — bổ sung tầng retry Ở CẤP LÔ, khác với retry đã có sẵn TRONG callUnifiedAI (retry đó chỉ ~6s tổng cộng, không đủ nếu mạng gián đoạn lâu hơn)
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
     if (lo.trangThai === "xong") continue; // đã xử lý (khi resume), bỏ qua
     lo.trangThai = "dang_chay";
     ghiJob(job);
-    try {
-      const contentBlocks = [];
-      lo.anh.forEach((img, k) => {
-        contentBlocks.push({ type: "text", text: `--- Ảnh số ${k + 1} (tên file: "${img.name || "?"}") ---` });
-        contentBlocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.base64 } });
-      });
-      contentBlocks.push({ type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien) });
-      const data = await callUnifiedAI(contentBlocks, undefined, job.provider);
-      const rawItems = parseRawJsonTuAI(data);
-      const { items } = chayPipeline9Buoc(rawItems, lo.anh.length, lo.anh);
-      lo.items = items;
-      lo.trangThai = "xong";
-      const chiPhi = tinhChiPhi(data.usage, undefined, job.provider || AI_PROVIDER);
-      lo.chiPhi = chiPhi;
-      ghiNhatKy({ luc: new Date().toISOString(), nguoi: job.nguoi, loai: `Job lô ${i + 1}/${job.cacLo.length}`, ten: job.jobId, ...chiPhi });
-    } catch (e) {
+
+    let thanhCong = false, loiLanCuoi = "";
+    for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
+      try {
+        const contentBlocks = [];
+        lo.anh.forEach((img, k) => {
+          contentBlocks.push({ type: "text", text: `--- Ảnh số ${k + 1} (tên file: "${img.name || "?"}") ---` });
+          contentBlocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.base64 } });
+        });
+        contentBlocks.push({ type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien) });
+        const data = await callUnifiedAI(contentBlocks, undefined, job.provider);
+        const rawItems = parseRawJsonTuAI(data);
+        const { items } = chayPipeline9Buoc(rawItems, lo.anh.length, lo.anh);
+        lo.items = items;
+        lo.trangThai = "xong";
+        thanhCong = true;
+        const chiPhi = tinhChiPhi(data.usage, undefined, job.provider || AI_PROVIDER);
+        lo.chiPhi = chiPhi;
+        ghiNhatKy({ luc: new Date().toISOString(), nguoi: job.nguoi, loai: `Job lô ${i + 1}/${job.cacLo.length}`, ten: job.jobId, ...chiPhi });
+        break;
+      } catch (e) {
+        loiLanCuoi = e.message;
+        if (lanThu < SO_LAN_THU_LO) await new Promise((r) => setTimeout(r, 5000 * lanThu)); // chờ 5s, 10s giữa các lần — dài hơn nhiều so với retry nội bộ trong callUnifiedAI, đủ vượt qua gián đoạn mạng dài hơn
+      }
+    }
+    if (!thanhCong) {
       lo.trangThai = "loi";
-      lo.loi = e.message;
+      lo.loi = loiLanCuoi;
     }
     ghiJob(job); // lưu NGAY sau mỗi lô — không mất tiến độ nếu bị gián đoạn
   }
@@ -1296,8 +1315,20 @@ async function xuLyJobNen(jobId) {
   ghiJob(job);
 }
 
+// GIỚI HẠN SỐ JOB CHẠY NỀN ĐỒNG THỜI — KHÁC với gioiHanDongThoi (đếm HTTP
+// request đang xử lý, không áp dụng cho job vì job trả response NGAY rồi mới
+// chạy nền dài hạn). Không giới hạn cái này, gọi tạo job nhiều lần liên tiếp
+// sẽ khiến NHIỀU xuLyJobNen chạy song song, MỖI CÁI giữ tới 20 ảnh base64
+// trong RAM cùng lúc khi đang xử lý lô — dễ làm tràn RAM trên gói Render nhỏ
+// (512MB). Từ chối RÕ RÀNG (429) thay vì để quá tải âm thầm.
+let soJobDangChayNen = 0;
+const GIOI_HAN_JOB_DONG_THOI = 2;
+
 app.post("/api/jobs/batch-analyze", batBuocDangNhap, async (req, res) => {
   try {
+    if (soJobDangChayNen >= GIOI_HAN_JOB_DONG_THOI) {
+      return res.status(429).json({ error: `Đang có ${soJobDangChayNen} job lớn chạy nền (tối đa ${GIOI_HAN_JOB_DONG_THOI} cùng lúc) — đợi job hiện tại xong rồi thử lại.` });
+    }
     const { images, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien } = req.body || {};
     if (!Array.isArray(images) || !images.length) return res.status(400).json({ error: "Thiếu danh sách ảnh" });
     if (images.length > 400) return res.status(400).json({ error: "Tối đa 400 trang mỗi job (quá lớn ngay cả khi chia lô)." });
@@ -1312,7 +1343,10 @@ app.post("/api/jobs/batch-analyze", batBuocDangNhap, async (req, res) => {
       cacLo, trangThaiTong: "dang_chay",
     };
     ghiJob(job);
-    xuLyJobNen(jobId).catch((e) => console.error("[Job] lỗi xử lý nền:", jobId, e.message)); // KHÔNG await — chạy nền, trả response ngay
+    soJobDangChayNen++;
+    xuLyJobNen(jobId)
+      .catch((e) => console.error("[Job] lỗi xử lý nền:", jobId, e.message))
+      .finally(() => { soJobDangChayNen = Math.max(0, soJobDangChayNen - 1); }); // luôn giảm lại dù thành công/lỗi
     res.json({ jobId, tongSoLo: cacLo.length, tongSoAnh: images.length, trangThai: "dang_chay" });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1658,9 +1692,19 @@ function donDepJobCu() {
     files.forEach((file) => {
       const filePath = path.join(jobDir, file);
       fs.stat(filePath, (errStat, stats) => {
-        if (!errStat && bayGio - stats.mtimeMs > THOI_GIAN_LUU_MS) {
+        if (errStat || bayGio - stats.mtimeMs <= THOI_GIAN_LUU_MS) return;
+        // AN TOÀN THÊM: dù mtime đã cũ >24h, vẫn đọc lại trạng thái job trước
+        // khi xoá — KHÔNG xoá nếu job đang "dang_chay" (dù cực hiếm xảy ra
+        // thật, phòng hờ rẻ tiền cho race window giữa đọc mtime và xoá file).
+        fs.readFile(filePath, "utf8", (errRead, content) => {
+          if (!errRead) {
+            try {
+              const job = JSON.parse(content);
+              if (job?.trangThaiTong === "dang_chay") return; // đang xử lý -> KHÔNG xoá dù mtime cũ
+            } catch (e) { /* file hỏng/không parse được -> vẫn cho xoá bình thường */ }
+          }
           fs.unlink(filePath, () => {});
-        }
+        });
       });
     });
   });
@@ -1698,4 +1742,17 @@ function dongServerAnToan(signal) {
   });
 }
 process.on("SIGTERM", () => dongServerAnToan("SIGTERM"));
+
+// LƯỚI AN TOÀN CUỐI CÙNG — chống crash toàn server nếu LỠ SÓT route/hàm nào
+// chưa bọc try/catch (đã kiểm chứng THẬT: Express 4 KHÔNG tự động bắt lỗi bất
+// đồng bộ — middleware app.use((err,req,res,next)=>...) KHÔNG được gọi tới
+// cho lỗi throw trong route async, ĐÃ TEST XÁC NHẬN process crash hoàn toàn
+// nếu không có 2 handler này). Đây là PHÒNG HỜ CUỐI, không thay thế việc bọc
+// try/catch từng route (đã sửa 2 route thật sự thiếu: /api/whoami, /api/usage-log).
+process.on("unhandledRejection", (err) => {
+  console.error("[UNHANDLED REJECTION] Lỗi async không được bắt ở đâu đó — server vẫn sống nhờ lưới an toàn này:", err?.message || err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT EXCEPTION] Lỗi đồng bộ không được bắt — server vẫn sống nhờ lưới an toàn này:", err?.message || err);
+});
 process.on("SIGINT", () => dongServerAnToan("SIGINT"));
