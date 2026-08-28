@@ -1,24 +1,41 @@
-// zip-build.js
+// ============================================================================
+// zip-build.js — Tự Động Đóng Gói QsEstimateApp.zip
+// ----------------------------------------------------------------------------
+// SỬA LỖI: trước đây chỉ đóng gói 5 file lõi (package.json, server.js,
+// index.html, app.bundle.js, .env.example) — THIẾU storage-postgres.js
+// (server.js require() file này khi có DATABASE_URL, thiếu sẽ crash khi
+// deploy có Postgres) và regression_test.js (cần cho CI). Giờ đóng gói đủ.
+// ============================================================================
 const fs = require("fs");
 const path = require("path");
+const { execSync } = require("child_process");
 
-console.log("Đang kiểm tra các file dự án trước khi tạo Zip...");
-
-// SỬA: thêm ".env.example" vào danh sách kiểm tra — trước đây chỉ kiểm tra 4
-// file nhưng lệnh zip in ra lại có 5 file (kèm .env.example). Nếu thiếu đúng
-// .env.example, script CŨ vẫn báo "sẵn sàng" (exit code 0), người dùng chạy
-// lệnh zip theo hướng dẫn thì zip vẫn tạo ra nhưng ÂM THẦM THIẾU file đó (chỉ
-// có 1 dòng "zip warning: name not matched" dễ bị bỏ sót) — đã kiểm chứng lỗi
-// này bằng cách tự tạo tình huống thiếu file rồi chạy thử.
-const requiredFiles = ["package.json", "server.js", "index.html", "app.bundle.js", ".env.example"];
-let missing = requiredFiles.filter((f) => !fs.existsSync(path.join(__dirname, f)));
+console.log("Kiểm tra các file bắt buộc...");
+const requiredFiles = ["package.json", "server.js", "index.html", "app.bundle.js", ".env.example", "storage-postgres.js", "regression_test.js", "golden_dataset_test.js", "golden-dataset.json", "dxf-worker.js", "vision-google.js"];
+const missing = requiredFiles.filter((f) => !fs.existsSync(path.join(__dirname, f)));
 
 if (missing.length > 0) {
-  console.error("Thiếu các file sau để đóng gói:", missing.join(", "));
+  console.error("❌ Thiếu các file:", missing.join(", "));
   process.exit(1);
 }
 
-console.log("Tất cả file cốt lõi đã sẵn sàng.");
-console.log("Vui lòng thực thi lệnh nén hệ điều hành tương ứng:");
-console.log("Windows (PowerShell): Compress-Archive -Path package.json, server.js, index.html, app.bundle.js, .env.example -DestinationPath QsEstimateApp.zip");
-console.log("Linux/macOS: zip -r QsEstimateApp.zip package.json server.js index.html app.bundle.js .env.example");
+// .gitignore là tuỳ chọn — không có cũng không chặn đóng gói (không phải file
+// bắt buộc để app CHẠY được, chỉ cần khi commit lên Git).
+const filesToZip = requiredFiles.concat(fs.existsSync(path.join(__dirname, ".gitignore")) ? [".gitignore"] : []);
+
+const zipName = "QsEstimateApp.zip";
+console.log("Đang tiến hành đóng gói tự động...");
+
+try {
+  if (process.platform === "win32") {
+    const cmd = `powershell -Command "Compress-Archive -Path ${filesToZip.join(", ")} -DestinationPath ${zipName} -Force"`;
+    execSync(cmd);
+  } else {
+    const cmd = `zip -r ${zipName} ${filesToZip.join(" ")}`;
+    execSync(cmd);
+  }
+  console.log(`✅ ĐÃ ĐÓNG GÓI THÀNH CÔNG: ${zipName} (${filesToZip.length} file)`);
+} catch (error) {
+  console.error("❌ Lỗi đóng gói ZIP:", error.message);
+  process.exit(1);
+}
