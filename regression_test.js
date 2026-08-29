@@ -353,6 +353,84 @@ test("Đối chiếu: chỉ 1 nguồn -> không có gì để so sánh chéo", d
   { doi_chieu: { ma_hieu: "D03", loaiNguon: "PLAN", soLuong: 7 } },
 ]).length, 0);
 
+// --- Fuzzy match: chặn khớp nhầm công tác ĐỐI NGHỊCH (đồng bộ QsEstimateApp.jsx) ---
+const CAC_CAP_TU_DOI_NGHICH_TEST = [
+  ["xây", "đục"], ["xây", "phá"], ["xây", "tháo"], ["xây", "dỡ"], ["xây", "tô"],
+  ["lắp", "tháo"], ["lắp", "dỡ"], ["lắp đặt", "tháo dỡ"],
+  ["trong", "ngoài"], ["trên", "dưới"], ["trước", "sau"],
+  ["tô", "đục"], ["sơn", "tẩy"], ["đổ", "phá"], ["xây dựng", "phá dỡ"],
+];
+function coTuDoiNghichTest(a, b) {
+  const la = String(a).toLowerCase(), lb = String(b).toLowerCase();
+  return CAC_CAP_TU_DOI_NGHICH_TEST.some(([x, y]) => (la.includes(x) && lb.includes(y)) || (la.includes(y) && lb.includes(x)));
+}
+function similarityTest(a, b) {
+  if (coTuDoiNghichTest(a, b)) return 0;
+  const cleanWords = (s) => String(s).toLowerCase().normalize("NFC").replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length > 1);
+  const wa = new Set(cleanWords(a)), wb = new Set(cleanWords(b));
+  if (!wa.size || !wb.size) return 0;
+  let common = 0;
+  wa.forEach((w) => { if (wb.has(w)) common++; });
+  return common / Math.max(wa.size, wb.size);
+}
+test("Fuzzy match: Xây vs Đục tường -> chặn (không tự động khớp)", similarityTest("Xây tường 200", "Đục tường 200") < 0.3, true);
+test("Fuzzy match: Lắp vs Tháo cửa -> chặn", similarityTest("Lắp cửa đi P1", "Tháo cửa đi P1") < 0.3, true);
+test("Fuzzy match: Xây vs Tô tường -> chặn", similarityTest("Xây tường gạch ống", "Tô tường gạch ống") < 0.3, true);
+test("Fuzzy match: cùng công tác vẫn khớp đúng (không bị chặn oan)", similarityTest("Xây tường 200", "Xây tường 200 gạch ống") >= 0.3, true);
+
+// --- Giới hạn số job chạy nền đồng thời (đồng bộ server.js) ---
+function taoJobTest(soJobHienTai, gioiHan) { return soJobHienTai >= gioiHan ? { loi: true } : { loi: false }; }
+test("Job: dưới giới hạn -> cho phép tạo", taoJobTest(1, 2).loi, false);
+test("Job: đạt giới hạn -> từ chối", taoJobTest(2, 2).loi, true);
+
+// --- Confidence Matrix: 4/5 chỉ số tính xác định, chỉ dimension là AI tự báo (đồng bộ server.js) ---
+function tinhConfidenceMatrixTest(item, b05Status, canhBaoTheoMaHieu) {
+  const evidenceConfidence = item.evidence_region ? 1.0 : 0;
+  const geometryConfidence = b05Status === "done" ? 1.0 : b05Status === "partial" ? 0.5 : 0.2;
+  const dimensionConfidence = Number.isFinite(item.confidence) ? item.confidence : null;
+  const formulaConfidence = item.qty_source === "app_formula" ? 1.0 : (item.qty_source === "engine_reconciliation" ? null : 0.3);
+  let reconciliationConfidence = 0.7;
+  if (item.doi_chieu?.ma_hieu) {
+    const maHieu = String(item.doi_chieu.ma_hieu).trim().toUpperCase();
+    reconciliationConfidence = canhBaoTheoMaHieu.has(maHieu) ? 0.3 : 1.0;
+  }
+  return { evidenceConfidence, geometryConfidence, dimensionConfidence, formulaConfidence, reconciliationConfidence };
+}
+test("Confidence: có evidence_region -> evidenceConfidence=1.0",
+  tinhConfidenceMatrixTest({ evidence_region: { x: 0.1, y: 0.1, w: 0.1, h: 0.1 } }, "done", new Set()).evidenceConfidence, 1.0);
+test("Confidence: không có evidence_region -> evidenceConfidence=0",
+  tinhConfidenceMatrixTest({}, "done", new Set()).evidenceConfidence, 0);
+test("Confidence: AI không tự báo confidence -> dimensionConfidence=null (không bịa)",
+  tinhConfidenceMatrixTest({}, "done", new Set()).dimensionConfidence, null);
+test("Confidence: mã hiệu bị đối chiếu lệch -> reconciliationConfidence=0.3",
+  tinhConfidenceMatrixTest({ doi_chieu: { ma_hieu: "D01" } }, "done", new Set(["D01"])).reconciliationConfidence, 0.3);
+test("Confidence: mã hiệu đối chiếu khớp -> reconciliationConfidence=1.0",
+  tinhConfidenceMatrixTest({ doi_chieu: { ma_hieu: "D02" } }, "done", new Set(["D01"])).reconciliationConfidence, 1.0);
+
+// --- b07_relationship: gợi ý liên kết tầng qua OCR — LUÔN "partial", KHÔNG BAO GIỜ "done" (đồng bộ server.js) ---
+function b07_relationshipTest(normalizedItems, ocrData) {
+  if (!ocrData || !Array.isArray(ocrData.items)) return { status: "blocked", relationships: [] };
+  const relationships = [];
+  const nhanTang = ocrData.items.filter((t) => /T[ẦA]NG\s*\d+|TRỆT|MÁI/i.test(t.text || ""));
+  normalizedItems.forEach((it, idx) => {
+    if (it.evidence_region && nhanTang.length) {
+      const tr = it.evidence_region;
+      const tangKhop = nhanTang.find((n) => n.evidence_region && Math.abs(n.evidence_region.y - tr.y) < 0.2);
+      if (tangKhop) relationships.push({ objectId: `OBJ-${idx + 1}`, target: tangKhop.text });
+    }
+  });
+  return { status: "partial", relationships };
+}
+test("b07: không có OCR -> vẫn blocked (không đổi hành vi cũ)", b07_relationshipTest([{}], null).status, "blocked");
+test("b07: có OCR, khớp đúng -> status partial (không phải done)", b07_relationshipTest(
+  [{ evidence_region: { x: 0.3, y: 0.12, w: 0.2, h: 0.1 } }],
+  { items: [{ text: "TẦNG 2", evidence_region: { x: 0.05, y: 0.1, w: 0.1, h: 0.02 } }] }
+).status, "partial");
+test("b07: kịch bản gán nhầm tầng (đã kiểm chứng) -> VẪN partial, không giả vờ done", b07_relationshipTest(
+  [{ evidence_region: { x: 0.3, y: 0.15, w: 0.2, h: 0.1 } }], // AI đoán sai, thực ra ở Tầng 3 (y=0.6) nhưng gần Tầng 2 (y=0.1) hơn
+  { items: [{ text: "TẦNG 2", evidence_region: { x: 0.05, y: 0.1, w: 0.1, h: 0.02 } }, { text: "TẦNG 3", evidence_region: { x: 0.05, y: 0.6, w: 0.1, h: 0.02 } }] }
+).status, "partial");
+
 // --- Polygon boolean thật cho tường (đồng bộ server.js) — CHỈ dùng khi có toạ
 // độ polygon thật (KHÔNG dạy AI Vision dùng vì AI không cho toạ độ pixel đáng
 // tin — đường này chờ nguồn dữ liệu chính xác như DXF trong tương lai) ---

@@ -661,13 +661,37 @@ function b06_geometry(normalizedItems) {
   return { step: "06_GEOMETRY", status: "blocked", reason: "Không có hạng mục nào cần tính hình học trong lượt đọc này (toàn bộ là đọc trực tiếp/đếm số lượng)" };
 }
 
-function b07_relationship() {
-  // BỊ CHẶN THẬT: cần Drawing Objects có toạ độ thật (bước 05 đã bị chặn) mới
-  // liên kết được tường-phòng, cột-tầng. Đã thử làm cho DXF (có toạ độ thật)
-  // — thuật toán đúng nhưng dữ liệu 1 file thử nghiệm không đáng tin (xem lịch
-  // sử: cột cách tường 300m, là bảng chú thích chứ không phải vị trí lắp đặt).
-  return { step: "07_RELATIONSHIP", status: "blocked", reason: "Cần toạ độ thật từ bước 05 (đã bị chặn cho ảnh/PDF) để liên kết tường↔phòng, cột↔tầng" };
+function b07_relationship(normalizedItems, ocrData) {
+  // Không có OCR -> giữ nguyên hành vi CŨ, THẬT SỰ blocked (không đổi gì nếu
+  // không ai chủ động truyền ocrData vào — an toàn, không phá vỡ luồng hiện tại).
+  if (!ocrData || !Array.isArray(ocrData.items)) {
+    return { step: "07_RELATIONSHIP", status: "blocked", reason: "Cần toạ độ thật từ bước 05 (đã bị chặn cho ảnh/PDF) để liên kết tường↔phòng, cột↔tầng. Bật GOOGLE_VISION_API_KEY để có nhãn tầng chính xác làm điểm neo (vẫn chỉ PARTIAL khi bật, không phải done — xem lý do khi có OCR)." };
+  }
+  // CÓ OCR: nhãn tầng CHÍNH XÁC (toạ độ pixel thật từ Google Vision), NHƯNG
+  // evidence_region của từng item vẫn là AI TỰ ƯỚC LƯỢNG — ĐÃ TEST THẬT chứng
+  // minh: dù nhãn tầng OCR đúng 100%, item vẫn có thể bị gán NHẦM tầng nếu AI
+  // ước lượng evidence_region sai (điểm yếu đã biết, không loại bỏ được chỉ
+  // bằng cách thêm OCR cho MỘT nửa dữ liệu). VÌ VẬY: LUÔN "partial", KHÔNG BAO
+  // GIỜ "done" — đây là GỢI Ý tham khảo, không phải kết luận đáng tin tuyệt đối.
+  const relationships = [];
+  const nhanTang = ocrData.items.filter((t) => /T[ẦA]NG\s*\d+|TRỆT|MÁI/i.test(t.text || ""));
+  normalizedItems.forEach((it, idx) => {
+    if (it.evidence_region && nhanTang.length) {
+      const tr = it.evidence_region;
+      const tangKhop = nhanTang.find((n) => n.evidence_region && Math.abs(n.evidence_region.y - tr.y) < 0.2);
+      if (tangKhop) relationships.push({ objectId: `OBJ-${String(idx + 1).padStart(4, "0")}`, target: tangKhop.text, type: "located_in_floor_GOI_Y" });
+    }
+  });
+  return {
+    step: "07_RELATIONSHIP",
+    status: "partial",
+    relationships,
+    reason: relationships.length
+      ? `GỢI Ý (không phải kết luận chắc chắn): ${relationships.length} liên kết cấu kiện↔tầng, dựa vào nhãn tầng CHÍNH XÁC từ Google Vision OCR đối chiếu với vùng ƯỚC LƯỢNG của AI (evidence_region) — vùng này AI tự đoán, KHÔNG chính xác tuyệt đối, nên liên kết CÓ THỂ SAI (đã kiểm chứng bằng test). Dùng tham khảo nhanh, KHÔNG tự động phân loại BOQ theo tầng dựa vào đây.`
+      : "Có OCR nhưng không tìm được nhãn tầng nào khớp gần vị trí ước lượng của các hạng mục — không đủ dữ liệu suy luận.",
+  };
 }
+
 
 function b08_takeoff(normalizedItems) {
   // THÀNH THẬT VỀ TÊN GỌI: bước này KHÔNG "giả lập" — phép tính khối lượng
@@ -723,6 +747,7 @@ function b09_reconciliation(items) {
   });
   return {
     ketQua: itemsMoi,
+    canhBaoThat, // expose để tính reconciliationConfidence cho từng dòng
     trace: {
       step: "09_RECONCILIATION",
       status: "done",
@@ -735,21 +760,44 @@ function b09_reconciliation(items) {
 
 // Orchestrator — chạy tuần tự đủ 9 bước, gom lại thành 1 "pipelineTrace" để trả
 // về cho frontend hiển thị minh bạch bước nào chạy thật/bị chặn + lý do.
-function chayPipeline9Buoc(rawItems, soLuongAnh, images) {
+// CONFIDENCE MATRIX — 5 chỉ số tách riêng thay vì 1 số "confidence" gộp chung.
+// CHỈ "dimensionConfidence" là AI TỰ BÁO CÁO (field "confidence" đã có sẵn) —
+// 4 chỉ số còn lại ĐỀU TÍNH XÁC ĐỊNH bằng Engine, KHÔNG hỏi AI tự đoán thêm 4
+// con số nữa (AI vốn đã không đủ tin cậy để tự báo cáo 1 số, hỏi thêm 4 số sẽ
+// chỉ tạo ra nhiễu, không phải tín hiệu thật).
+function tinhConfidenceMatrix(item, b05Status, canhBaoTheoMaHieu) {
+  const evidenceConfidence = item.evidence_region ? 1.0 : 0;
+  const geometryConfidence = b05Status === "done" ? 1.0 : b05Status === "partial" ? 0.5 : 0.2;
+  const dimensionConfidence = Number.isFinite(item.confidence) ? item.confidence : null; // giữ nguyên AI tự báo, null nếu AI không báo
+  const formulaConfidence = item.qty_source === "app_formula" ? 1.0 : (item.qty_source === "engine_reconciliation" ? null : 0.3); // Engine tự tính = tin cậy cao nhất
+  let reconciliationConfidence = 0.7; // trung tính — không có gì để đối chiếu chéo
+  if (item.doi_chieu?.ma_hieu) {
+    const maHieu = String(item.doi_chieu.ma_hieu).trim().toUpperCase();
+    reconciliationConfidence = canhBaoTheoMaHieu.has(maHieu) ? 0.3 : 1.0; // có lệch = giảm tin cậy, khớp = cao nhất
+  }
+  return { evidenceConfidence, geometryConfidence, dimensionConfidence, formulaConfidence, reconciliationConfidence };
+}
+
+function chayPipeline9Buoc(rawItems, soLuongAnh, images, ocrData = null) {
   const trace = [];
   trace.push(b01_ingest(images));
   trace.push(b02_classify(rawItems));
   trace.push(b03_extract(soLuongAnh));
   const b04 = b04_normalize(rawItems);
   trace.push(b04.trace);
-  trace.push(b05_scale(b04.ketQua));
+  const b05Trace = b05_scale(b04.ketQua);
+  trace.push(b05Trace);
   trace.push(b06_geometry(b04.ketQua));
-  trace.push(b07_relationship());
+  trace.push(b07_relationship(b04.ketQua, ocrData));
   const b08 = b08_takeoff(b04.ketQua);
   trace.push(b08.trace);
   const b09 = b09_reconciliation(b08.ketQua);
   trace.push(b09.trace);
-  return { items: b09.ketQua, pipelineTrace: trace, drawingModel: xayDungDrawingModel(b09.ketQua, images, trace) };
+
+  const maHieuLech = new Set((b09.canhBaoThat || []).map((c) => c.maHieu));
+  const itemsVoiConfidence = b09.ketQua.map((it) => ({ ...it, confidenceMatrix: tinhConfidenceMatrix(it, b05Trace.status, maHieuLech) }));
+
+  return { items: itemsVoiConfidence, pipelineTrace: trace, drawingModel: xayDungDrawingModel(itemsVoiConfidence, images, trace) };
 }
 
 // Cấu trúc đầu ra chuẩn hoá {drawing, pages, objects, evidence, dimensions,
