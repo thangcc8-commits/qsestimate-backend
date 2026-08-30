@@ -319,6 +319,13 @@ async function ocrGoogleVisionBatch(images, apiKey, opts = {}) {
       continue;
     }
     const bytes = uocLuongBytes(base64);
+    // SỬA LỖI THẬT: batch trước đây THIẾU check này — hàm đơn lẻ đã có
+    // "anh_qua_nho" từ trước, batch chỉ check "quá ngắn"/"quá lớn", bỏ sót
+    // trường hợp ảnh gần rỗng/trắng (giữa 2 ngưỡng) vẫn tốn phí gọi API.
+    if (bytes < MIN_IMAGE_BYTES) {
+      results[i] = { tongSoText: 0, items: [], goiYSoDo: [], fromCache: false, skipped: "anh_qua_nho", bytes };
+      continue;
+    }
     if (bytes > MAX_IMAGE_BYTES) {
       skippedLarge++;
       results[i] = { tongSoText: 0, items: [], goiYSoDo: [], fromCache: false, skipped: "anh_qua_lon", bytes };

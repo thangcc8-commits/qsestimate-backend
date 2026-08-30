@@ -1148,6 +1148,19 @@ const BANG_CONG_THUC_ENGINE = {
   tinh_tu_kich_thuoc_san: { fn: tinhQtySanTuFormulaInputs, moTa: (fi) => `${fi?.dai_m}m × ${fi?.rong_m}m × ${fi?.day_m}m dày (m³)` },
 };
 
+// Đơn vị ĐÚNG theo calc_type — Engine ĐÃ BIẾT CHẮC CHẮN đơn vị nào đúng cho 5
+// loại tính hình học (không cần tin AI báo cáo, giống triết lý "Engine quyết
+// định qty, không phải AI" áp dụng xuyên suốt). doc_truc_tiep/dem_so_luong
+// KHÔNG có ở đây — đơn vị của 2 loại này CÓ THỂ là bất kỳ gì (cái, bộ, m...),
+// không thể áp quy tắc cứng.
+const DON_VI_DUNG_THEO_CALC_TYPE = {
+  tinh_tu_kich_thuoc_tuong: "m2",
+  tinh_tu_kich_thuoc_cot: "m3",
+  tinh_tu_kich_thuoc_dam: "m3",
+  tinh_tu_kich_thuoc_mong: "m3",
+  tinh_tu_kich_thuoc_san: "m3",
+};
+
 function locHangMucHopLe(danhSach) {
   return (danhSach || [])
     .map((raw) => {
@@ -1164,6 +1177,15 @@ function locHangMucHopLe(danhSach) {
         item.qty = qtyThat; // null nếu formula_inputs thiếu/hỏng -> dòng này bị lọc bỏ ở bước dưới
         item.note = (item.note || "") + ` [Engine tự tính: ${congThuc.moTa(item.formula_inputs)} = ${qtyThat != null ? qtyThat : "LỖI"} — không dùng bất kỳ số nào AI có thể đã tự đưa]`;
         item.qty_source = "app_formula";
+        // SỬA LỖI THẬT: nếu calc_type có đơn vị CHẮC CHẮN (tường=m², cột/dầm/
+        // móng/sàn=m³), TỰ ĐỘNG ÉP ĐÚNG — không tin unit AI báo cáo (có thể
+        // nhầm m²/m³, VD AI gõ "m2" cho dòng tính bê tông cột đáng lẽ m³).
+        const donViDung = DON_VI_DUNG_THEO_CALC_TYPE[item.calc_type];
+        if (donViDung && item.unit !== donViDung) {
+          const unitCu = item.unit;
+          item.unit = donViDung;
+          item.note += ` [Đơn vị đã tự sửa từ "${unitCu}" thành "${donViDung}" — calc_type này luôn cho đơn vị cố định, không tin đơn vị AI tự báo cáo]`;
+        }
       } else {
         // calc_type thiếu/không nhận diện được -> KHÔNG có cách nào tính ra
         // qty đáng tin -> loại bỏ, không đoán bừa.

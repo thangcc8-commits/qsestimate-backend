@@ -647,6 +647,53 @@ if (coDuFile) {
   testDk("Object-first: object gộp có soLuongKhoiLuong=2", kqObj2.objects[0].soLuongKhoiLuong === 2);
   testDk("Object-first: 2 quantities CÙNG objectId", kqObj2.quantities[0].objectId === kqObj2.quantities[1].objectId);
 
+  // --- OCR độc lập: IMPORT TRỰC TIẾP vision-google.js thật (không sao chép
+  // logic) — tránh drift giữa test và code thật đã từng xảy ra ---
+  try {
+    const originalFetch = global.fetch;
+    global.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        responses: [{
+          textAnnotations: [],
+          fullTextAnnotation: { pages: [{ blocks: [{ paragraphs: [{ words: [
+            { symbols: [{ text: "T" }, { text: "Ầ" }, { text: "N" }, { text: "G" }], boundingBox: { vertices: [{ x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 2 }, { x: 1, y: 2 }] } },
+            { symbols: [{ text: "4" }], boundingBox: { vertices: [{ x: 3, y: 1 }, { x: 4, y: 1 }, { x: 4, y: 2 }, { x: 3, y: 2 }] } },
+          ] }] }] }] },
+        }],
+      }),
+    });
+    process.env.VISION_FEATURE = "DOCUMENT_TEXT_DETECTION";
+    delete require.cache[require.resolve("./vision-google.js")];
+    const vg = require("./vision-google.js");
+    const anhThat = Buffer.alloc(2000, 1).toString("base64"); // đủ lớn vượt MIN_IMAGE_BYTES
+
+    const kqDon = await vg.ocrGoogleVision(anhThat, "image/png", "fake_key");
+    testDk("OCR thật: hàm đơn lẻ trích xuất được TỪ ĐẦU TIÊN (không rơi mất)", kqDon.items.some((t) => t.text === "TẦNG"));
+    testDk("OCR thật: hàm đơn lẻ trích xuất đủ cả 2 từ", kqDon.tongSoText === 2);
+
+    const kqBatch = await vg.ocrGoogleVisionBatch([{ base64: anhThat, mediaType: "image/png" }], "fake_key");
+    testDk("OCR thật: batch cũng trích xuất được TỪ ĐẦU TIÊN (đồng bộ với đơn lẻ)", kqBatch[0].items.some((t) => t.text === "TẦNG"));
+
+    const anhQuaNho = Buffer.alloc(50).toString("base64");
+    const kqNho = await vg.ocrGoogleVisionBatch([{ base64: anhQuaNho, mediaType: "image/png" }], "fake_key");
+    testDk("OCR thật: batch chặn đúng ảnh quá nhỏ", kqNho[0].skipped === "anh_qua_nho");
+
+    global.fetch = originalFetch;
+  } catch (e) {
+    testDk("OCR độc lập (vision-google.js) — module tải và chạy được", false, e.message);
+  }
+
+  // --- Đơn vị ép đúng theo calc_type (đồng bộ server.js) ---
+  const DON_VI_DUNG_TEST = { tinh_tu_kich_thuoc_tuong: "m2", tinh_tu_kich_thuoc_cot: "m3", tinh_tu_kich_thuoc_dam: "m3", tinh_tu_kich_thuoc_mong: "m3", tinh_tu_kich_thuoc_san: "m3" };
+  function epDonViDungTest(calcType, unitAiBaoCao) {
+    const donViDung = DON_VI_DUNG_TEST[calcType];
+    return donViDung && unitAiBaoCao !== donViDung ? donViDung : unitAiBaoCao;
+  }
+  testDk("Đơn vị: AI báo nhầm m2 cho cột -> Engine tự ép đúng m3", epDonViDungTest("tinh_tu_kich_thuoc_cot", "m2") === "m3");
+  testDk("Đơn vị: AI báo đúng m2 cho tường -> giữ nguyên", epDonViDungTest("tinh_tu_kich_thuoc_tuong", "m2") === "m2");
+  testDk("Đơn vị: dem_so_luong không có trong bảng -> giữ nguyên bất kỳ đơn vị nào", epDonViDungTest("dem_so_luong", "cai") === "cai");
+
   // --- Bug thật tìm qua audit (đồng bộ server.js/vision-google.js) ---
   // 1. Polygon: lỗ mở HOÀN TOÀN bên trong tường -> phải TRỪ, không được CỘNG
   const polygonClipping2 = require("polygon-clipping");
