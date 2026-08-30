@@ -1,0 +1,49 @@
+{
+  "_README": [
+    "GOLDEN DATASET — so sánh khối lượng app tự tính (AUTO) với khối lượng QS đã",
+    "kiểm tra/nghiệm thu THẬT ngoài công trường (QS) — để CHỨNG MINH độ chính xác",
+    "thật, không chỉ chứng minh logic công thức đúng (khác hẳn regression_test.js).",
+    "",
+    "Cách thêm 1 entry thật: sau khi công trình xây xong, QS đo đạc thật khối",
+    "lượng ngoài công trường (hoặc từ hồ sơ nghiệm thu), điền vào đây:",
+    "{ \"projectId\": \"PROJECT_001\", \"hangMuc\": \"Xây tường Tầng 1\", \"unit\": \"m2\",",
+    "  \"auto\": 1253.42, \"qs\": 1247.80, \"nguon\": \"Hồ sơ nghiệm thu ngày DD/MM/YYYY\" }",
+    "",
+    "Chạy: node golden_dataset_test.js — tự tính % lệch, PASS nếu trong ngưỡng",
+    "dung sai (mặc định 5%, chỉnh trong golden_dataset_test.js nếu công ty có",
+    "tiêu chuẩn khác). CI (.github/workflows/regression.yml) sẽ TỰ CHẶN build nếu",
+    "có bất kỳ entry nào vượt ngưỡng — không thể âm thầm merge code làm giảm độ",
+    "chính xác mà không ai biết.",
+    "",
+    "LƯU Ý VỀ MẪU HIỆN CÓ (3 entry đầu tiên, 2 công trình): chỉ 3 điểm dữ liệu —",
+    "CHƯA đủ để kết luận có ý nghĩa thống kê về độ chính xác tổng thể của app.",
+    "Đây là khởi đầu, cần tích luỹ thêm mỗi khi có công trình mới nghiệm thu xong."
+  ],
+  "toleranceMacDinh": 0.05,
+  "entries": [
+    {
+      "projectId": "PJ_NP_001_GOVAP",
+      "hangMuc": "Xây tường gạch ống 100mm Tầng 1",
+      "auto": 128.5,
+      "qs": 130.0,
+      "unit": "m2",
+      "nguon": "Nghiệm thu thực tế đợt 1 - Công trình Nhà phố Gò Vấp"
+    },
+    {
+      "projectId": "PJ_NP_001_GOVAP",
+      "hangMuc": "Bê tông cột D200x300 Mác 250",
+      "auto": 8.42,
+      "qs": 8.5,
+      "unit": "m3",
+      "nguon": "Nhật ký đổ bê tông cột Tầng Trệt"
+    },
+    {
+      "projectId": "PJ_SH_002_THUDUC",
+      "hangMuc": "Sơn nước nội thất 2 lớp",
+      "auto": 412.0,
+      "qs": 420.0,
+      "unit": "m2",
+      "nguon": "Bản vẽ hoàn công Shophouse Thủ Đức"
+    }
+  ]
+}

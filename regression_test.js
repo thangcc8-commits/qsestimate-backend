@@ -533,8 +533,171 @@ if (coDuFile) {
 }
 
 // ============================================================================
-console.log("");
-console.log(`Tổng kết: ${soPass} PASS, ${soFail} FAIL`);
-if (soFail > 0) { console.log("❌ CÓ TEST THẤT BẠI — kiểm tra lại trước khi deploy!"); process.exit(1); }
-console.log("✅ TẤT CẢ TEST ĐỀU ĐẠT — an toàn để deploy.");
-process.exit(0);
+(async () => {
+  // Chia PDF lớn (đồng bộ server.js) — Claude API giới hạn cứng 100 trang/request,
+  // vượt quá THẤT BẠI HOÀN TOÀN — dùng pdf-lib (thuần JS, không cần Poppler/Docker).
+  try {
+    const { PDFDocument } = require("pdf-lib");
+    const NGUONG_TRANG_AN_TOAN_TEST = 90;
+    async function chiaPdfTest(base64) {
+      const bytes = Buffer.from(base64, "base64");
+      const src = await PDFDocument.load(bytes);
+      const tongSoTrang = src.getPageCount();
+      if (tongSoTrang <= NGUONG_TRANG_AN_TOAN_TEST) return { tongSoTrang, cacPhan: [{ base64, tuTrang: 1, denTrang: tongSoTrang }] };
+      const cacPhan = [];
+      for (let start = 0; start < tongSoTrang; start += NGUONG_TRANG_AN_TOAN_TEST) {
+        const end = Math.min(start + NGUONG_TRANG_AN_TOAN_TEST, tongSoTrang);
+        const newDoc = await PDFDocument.create();
+        const indices = Array.from({ length: end - start }, (_, k) => start + k);
+        const copied = await newDoc.copyPages(src, indices);
+        copied.forEach((p) => newDoc.addPage(p));
+        cacPhan.push({ base64: Buffer.from(await newDoc.save()).toString("base64"), tuTrang: start + 1, denTrang: end });
+      }
+      return { tongSoTrang, cacPhan };
+    }
+    async function taoPdfNTrang(n) {
+      const doc = await PDFDocument.create();
+      for (let i = 0; i < n; i++) doc.addPage([200, 200]);
+      return Buffer.from(await doc.save()).toString("base64");
+    }
+
+    const pdf50 = await taoPdfNTrang(50);
+    const kq50 = await chiaPdfTest(pdf50);
+    test("Chia PDF: 50 trang (dưới ngưỡng) -> không chia, giữ nguyên", kq50.cacPhan.length, 1);
+    test("Chia PDF: 50 trang -> base64 giữ nguyên gốc", kq50.cacPhan[0].base64 === pdf50, true);
+
+    const pdf200 = await taoPdfNTrang(200);
+    const kq200 = await chiaPdfTest(pdf200);
+    test("Chia PDF: 200 trang (vượt ngưỡng) -> tự động chia", kq200.cacPhan.length > 1, true);
+    test("Chia PDF: 200 trang -> mỗi phần đều ≤100 trang (đúng giới hạn Claude)", kq200.cacPhan.every((p) => p.denTrang - p.tuTrang + 1 <= 100), true);
+    const tongTrangSauKhiChia = kq200.cacPhan.reduce((s, p) => s + (p.denTrang - p.tuTrang + 1), 0);
+    test("Chia PDF: 200 trang -> tổng số trang các phần cộng lại = 200 (không mất/thừa trang)", tongTrangSauKhiChia, 200);
+  } catch (e) {
+    testDk("Chia PDF lớn (pdf-lib) — module tải và chạy được", false, e.message);
+  }
+
+  // Kiểm tra ảnh hợp lệ trước khi gọi AI (đồng bộ server.js) — phát hiện sớm
+  // ảnh rỗng/hỏng/HEIC, tránh tốn tiền gọi Claude vô ích.
+  function kiemTraAnhBase64Test(base64, mediaType) {
+    if (!base64 || typeof base64 !== "string") return { ok: false, code: "missing" };
+    let b64 = base64;
+    const dataUrl = /^data:([^;]+);base64,(.*)$/i.exec(base64);
+    if (dataUrl) { b64 = dataUrl[2]; if (!mediaType && dataUrl[1]) mediaType = dataUrl[1]; }
+    b64 = b64.replace(/\s/g, "");
+    if (b64.length < 64) return { ok: false, code: "too_short" };
+    let buf;
+    try { buf = Buffer.from(b64, "base64"); } catch { return { ok: false, code: "bad_base64" }; }
+    if (buf.length < 100) return { ok: false, code: "too_small" };
+    const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+    const isJpg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    if (!isPng && !isJpg) return { ok: false, code: "bad_magic" };
+    return { ok: true, mediaType: mediaType || (isPng ? "image/png" : "image/jpeg"), bytes: buf.length, base64: b64 };
+  }
+  const pngThatTest = "iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAIAAACRXR/mAAAAS0lEQVR4nO3OsQEAEADAMPz/Mw9YMjE0F2Tu8aP1OnBXS9QStUQtUUvUErVELVFL1BK1RC1RS9QStUQtUUvUErVELVFL1BK1RC1xAEGqAWOFuDKrAAAAAElFTkSuQmCC"; // ảnh PNG thật 50x50, 132 byte
+  testDk("Kiểm tra ảnh: PNG hợp lệ đủ lớn -> ok:true", kiemTraAnhBase64Test(pngThatTest, "image/png").ok === true);
+  testDk("Kiểm tra ảnh: file giả (không phải ảnh) -> bad_magic", kiemTraAnhBase64Test(Buffer.from("day khong phai la anh, chi la mot chuoi van ban binh thuong duoc viet du dai de vuot qua nguong 100 byte kiem tra magic bytes trong ham").toString("base64")).code === "bad_magic");
+  testDk("Kiểm tra ảnh: tự bóc tách data-URL prefix", kiemTraAnhBase64Test("data:image/png;base64," + pngThatTest).mediaType === "image/png");
+  testDk("Kiểm tra ảnh: base64 quá ngắn -> too_short", kiemTraAnhBase64Test("abc").code === "too_short");
+  testDk("Kiểm tra ảnh: thiếu hoàn toàn -> missing", kiemTraAnhBase64Test("").code === "missing");
+
+  // So sánh mã truy cập constant-time (đồng bộ server.js) — chống timing attack
+  function soSanhMaAnToanTest(a, b) {
+    const crypto = require("crypto");
+    const ba = Buffer.from(String(a || ""), "utf8");
+    const bb = Buffer.from(String(b || ""), "utf8");
+    if (ba.length !== bb.length) {
+      crypto.timingSafeEqual(ba.length ? ba : Buffer.from("0"), ba.length ? ba : Buffer.from("0"));
+      return false;
+    }
+    try { return crypto.timingSafeEqual(ba, bb); } catch { return false; }
+  }
+  testDk("So sánh mã: đúng -> true", soSanhMaAnToanTest("PTC001", "PTC001") === true);
+  testDk("So sánh mã: sai cùng độ dài -> false", soSanhMaAnToanTest("PTC001", "PTC002") === false);
+  testDk("So sánh mã: khác độ dài -> false, không throw", soSanhMaAnToanTest("PTC001", "A") === false);
+
+  // Object-first Drawing Model (đồng bộ server.js) — object_ref TUỲ CHỌN cho
+  // phép nhiều khối lượng khác loại công tác cùng tham chiếu 1 vật thể vật lý
+  function xayDungDrawingModelTest(items) {
+    const objectIdCuaItem = [];
+    const nhomTheoRef = new Map();
+    let demTuSinh = 0;
+    items.forEach((it, i) => {
+      const ref = it.object_ref && typeof it.object_ref === "string" ? it.object_ref.trim() : "";
+      if (ref) { if (!nhomTheoRef.has(ref)) nhomTheoRef.set(ref, []); nhomTheoRef.get(ref).push(i); }
+      else { demTuSinh++; objectIdCuaItem[i] = `OBJ-${String(demTuSinh).padStart(4, "0")}`; }
+    });
+    let demNhom = 0;
+    nhomTheoRef.forEach((indices) => { demNhom++; const id = `OBJ-REF-${String(demNhom).padStart(4, "0")}`; indices.forEach((i) => { objectIdCuaItem[i] = id; }); });
+    const objectMap = new Map();
+    items.forEach((it, i) => {
+      const id = objectIdCuaItem[i];
+      if (!objectMap.has(id)) objectMap.set(id, { id, soLuongKhoiLuong: 0 });
+      objectMap.get(id).soLuongKhoiLuong++;
+    });
+    const quantities = items.map((it, i) => ({ objectId: objectIdCuaItem[i] }));
+    return { objects: Array.from(objectMap.values()), quantities };
+  }
+  const kqObj1 = xayDungDrawingModelTest([{ name: "A" }, { name: "B" }]);
+  testDk("Object-first: không dùng object_ref -> mỗi item 1 object riêng (tương thích ngược)", kqObj1.objects.length === 2);
+  const kqObj2 = xayDungDrawingModelTest([
+    { name: "Xây tường", object_ref: "tuong_1" },
+    { name: "Sơn tường", object_ref: "tuong_1" },
+  ]);
+  testDk("Object-first: 2 item CÙNG object_ref -> gom 1 object", kqObj2.objects.length === 1);
+  testDk("Object-first: object gộp có soLuongKhoiLuong=2", kqObj2.objects[0].soLuongKhoiLuong === 2);
+  testDk("Object-first: 2 quantities CÙNG objectId", kqObj2.quantities[0].objectId === kqObj2.quantities[1].objectId);
+
+  // --- Bug thật tìm qua audit (đồng bộ server.js/vision-google.js) ---
+  // 1. Polygon: lỗ mở HOÀN TOÀN bên trong tường -> phải TRỪ, không được CỘNG
+  const polygonClipping2 = require("polygon-clipping");
+  function dienTichShoelaceTest(vertices) {
+    let s = 0;
+    for (let i = 0; i < vertices.length - 1; i++) s += vertices[i][0] * vertices[i + 1][1] - vertices[i + 1][0] * vertices[i][1];
+    return Math.abs(s) / 2;
+  }
+  function tinhDienTichPolygonTest(ngoai, loMo) {
+    const ketQua = polygonClipping2.difference([ngoai], [loMo]);
+    let dt = 0;
+    ketQua.forEach((poly) => poly.forEach((ring, idx) => { const d = dienTichShoelaceTest(ring); dt += idx === 0 ? d : -d; }));
+    return +dt.toFixed(4);
+  }
+  testDk("Polygon: lỗ mở hoàn toàn bên trong -> trừ đúng (94, không phải 106)",
+    tinhDienTichPolygonTest([[0, 0], [10, 0], [10, 10], [0, 10], [0, 0]], [[4, 3], [6, 3], [6, 6], [4, 6], [4, 3]]) === 94);
+
+  // 2. b07_relationship trả itemIndex (số thô), không phải objectId cố định
+  function b07RelationshipTest2(items, ocrData) {
+    if (!ocrData) return { relationships: [] };
+    const relationships = [];
+    const nhanTang = ocrData.items.filter((t) => /T[ẦA]NG\s*\d+/i.test(t.text || ""));
+    items.forEach((it, idx) => {
+      if (it.evidence_region && nhanTang.length) {
+        const tangKhop = nhanTang.find((n) => Math.abs(n.evidence_region.y - it.evidence_region.y) < 0.2);
+        if (tangKhop) relationships.push({ itemIndex: idx, target: tangKhop.text });
+      }
+    });
+    return { relationships };
+  }
+  const rel2 = b07RelationshipTest2(
+    [{ evidence_region: { x: 0.3, y: 0.12 } }],
+    { items: [{ text: "TẦNG 2", evidence_region: { x: 0.05, y: 0.1 } }] }
+  );
+  testDk("Relationship: trả itemIndex số nguyên (map được sang object ID thật)", Number.isInteger(rel2.relationships[0]?.itemIndex));
+
+  // 3. Khối lượng thiếu unit phải bị loại
+  function locHopLeTest(danhSach) {
+    return danhSach.filter((item) => {
+      if (typeof item.name !== "string" || !item.name.trim()) return false;
+      if (typeof item.unit !== "string" || !item.unit.trim()) return false;
+      if (item.qty == null || !Number.isFinite(Number(item.qty)) || item.qty < 0) return false;
+      return true;
+    });
+  }
+  testDk("Filter: dòng thiếu unit bị loại", locHopLeTest([{ name: "Tường", qty: 50 }]).length === 0);
+  testDk("Filter: dòng đủ unit vẫn qua", locHopLeTest([{ name: "Tường", unit: "m2", qty: 50 }]).length === 1);
+
+  console.log("");
+  console.log(`Tổng kết: ${soPass} PASS, ${soFail} FAIL`);
+  if (soFail > 0) { console.log("❌ CÓ TEST THẤT BẠI — kiểm tra lại trước khi deploy!"); process.exit(1); }
+  console.log("✅ TẤT CẢ TEST ĐỀU ĐẠT — an toàn để deploy.");
+  process.exit(0);
+})();

@@ -50,9 +50,19 @@ const GOOGLE_VISION_API_KEY = process.env.GOOGLE_VISION_API_KEY || "";
 // nhận chi phí thêm để luôn có OCR đối chiếu tự động.
 const VISION_WITH_ANALYZE = process.env.VISION_WITH_ANALYZE === "1";
 let ocrGoogleVision = null;
+// Mặc định an toàn nếu vision-google.js không tải được — không crash gì khác
+let thongKeCacheOcr = () => ({ hits: 0, misses: 0, apiCalls: 0, enabled: false });
+let xoaCacheOcr = async () => ({ ok: false, message: "OCR chưa được cấu hình." });
 if (GOOGLE_VISION_API_KEY) {
-  try { ocrGoogleVision = require("./vision-google.js").ocrGoogleVision; console.log("✓ Google Vision OCR đã bật (bổ sung, không thay Claude)"); }
-  catch (e) { console.error("✗ Không load được vision-google.js:", e.message); }
+  try {
+    const vg = require("./vision-google.js");
+    ocrGoogleVision = vg.ocrGoogleVision;
+    if (vg.thongKeCacheOcr) thongKeCacheOcr = vg.thongKeCacheOcr;
+    if (vg.xoaCacheOcr) xoaCacheOcr = vg.xoaCacheOcr;
+    // CỐ Ý KHÔNG gọi vg.ganRedisLayer — cache CHỈ dùng RAM (đủ dùng, không cần
+    // dịch vụ Redis ngoài trả phí). Redis vẫn nằm ngoài phạm vi hiện tại.
+    console.log("✓ Google Vision OCR đã bật (bổ sung, không thay Claude) — cache RAM 2 giờ/120 mục, batch tối đa 8 ảnh/HTTP");
+  } catch (e) { console.error("✗ Không load được vision-google.js:", e.message); }
 }
 
 
@@ -73,6 +83,65 @@ if (ALLOWED_ORIGIN === "*") {
 app.use(cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN }));
 app.options("*", cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN })); // trả lời yêu cầu "thăm dò" (preflight) của trình duyệt
 app.use(express.json({ limit: "40mb" })); // dư địa an toàn — trần thật nằm ở phía Anthropic (32MB), không phải ở đây
+
+// ---- Bảo mật HTTP cơ bản (không cần package helmet) ----
+app.disable("x-powered-by");
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("X-DNS-Prefetch-Control", "off");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  if (process.env.NODE_ENV === "production" || process.env.FORCE_SECURE_HEADERS === "1") {
+    res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+  }
+  next();
+});
+
+// Rate limit CHUNG (không phải AI) — chống brute-force mã truy cập/spam
+// storage. Trước đây chỉ có aiLimiter cho các endpoint gọi AI, các endpoint
+// khác (storage, đăng nhập...) hoàn toàn không giới hạn.
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_GENERAL_MAX) || 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Quá nhiều request — thử lại sau 15 phút." },
+});
+app.use("/api/", generalLimiter);
+
+// ---- CSRF / cross-origin write protection ----
+// Auth dùng header x-access-code (KHÔNG cookie session) → trình duyệt không tự
+// gửi mã khi form cross-site → CSRF cổ điển đã thấp sẵn. Khi ALLOWED_ORIGIN đã
+// khoá về đúng domain thật: chặn thêm POST/PUT/PATCH/DELETE có Origin/Referer
+// KHÁC domain đó — lớp phòng thủ bổ sung, không thay thế xác thực chính.
+function chuanHoaOrigin(o) {
+  if (!o || typeof o !== "string") return "";
+  try {
+    const u = new URL(o);
+    return (u.protocol + "//" + u.host).toLowerCase();
+  } catch {
+    return o.replace(/\/$/, "").toLowerCase();
+  }
+}
+const CSRF_STRICT = process.env.CSRF_STRICT === "1"; // 1 = từ chối cả request thiếu Origin (curl/Postman/server-to-server)
+function kiemTraOriginCsrf(req, res, next) {
+  const method = (req.method || "GET").toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+  if (!ALLOWED_ORIGIN || ALLOWED_ORIGIN === "*") return next(); // chưa khoá CORS -> không đủ thông tin để so sánh, bỏ qua lớp này
+
+  const allowed = chuanHoaOrigin(ALLOWED_ORIGIN);
+  const origin = chuanHoaOrigin(req.get("origin") || "");
+  let refererOrigin = "";
+  const ref = req.get("referer") || req.get("referrer") || "";
+  if (ref) { try { refererOrigin = chuanHoaOrigin(new URL(ref).origin); } catch (_) {} }
+
+  if (origin && origin === allowed) return next();
+  if (!origin && refererOrigin && refererOrigin === allowed) return next();
+  if (!origin && !refererOrigin && !CSRF_STRICT) return next(); // curl/Postman/server-to-server — cho phép khi không strict
+  return res.status(403).json({ error: "Origin không được phép (CSRF/CORS). Đặt ALLOWED_ORIGIN đúng domain app hoặc gọi kèm Origin hợp lệ." });
+}
+app.use("/api/", kiemTraOriginCsrf);
 
 // Giới hạn số lượt gọi AI / IP trong 15 phút — tránh bị lạm dụng gọi tràn lan tốn tiền
 const aiLimiter = rateLimit({
@@ -220,9 +289,30 @@ const CO_PHAN_QUYEN = Object.keys(ACCESS_CODES).length > 0 || !!process.env.DATA
 // định, cần khởi động lại server mới đổi được) khi Postgres không active HOẶC
 // không tìm thấy mã đó trong Postgres — giữ nguyên hành vi cũ khi chưa dùng
 // Postgres, không phá vỡ gì.
+// So sánh constant-time — giảm rủi ro timing attack khi dò mã truy cập. Tra
+// cứu object trực tiếp (ACCESS_CODES[ma]) có thể nhanh/chậm khác nhau tuỳ mã
+// có tồn tại hay không, tạo kênh rò rỉ thời gian nhỏ — dùng crypto.timingSafeEqual
+// + LUÔN duyệt hết danh sách (không dừng sớm khi tìm thấy) để thời gian phản
+// hồi ổn định bất kể mã đúng/sai/tồn tại hay không.
+function soSanhMaAnToan(a, b) {
+  const crypto = require("crypto");
+  const ba = Buffer.from(String(a || ""), "utf8");
+  const bb = Buffer.from(String(b || ""), "utf8");
+  if (ba.length !== bb.length) {
+    crypto.timingSafeEqual(ba.length ? ba : Buffer.from("0"), ba.length ? ba : Buffer.from("0")); // so sánh dummy để thời gian gần bằng
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
+
 async function layNguoiDung(req) {
   const ma = (req.header("x-access-code") || "").trim();
   if (!ma) return null;
+  if (ma.length > 128) return null; // chặn payload bất thường
   if (pgStore && process.env.DATABASE_URL) {
     try {
       const uPg = await pgStore.kiemTraAccessCode(ma);
@@ -231,9 +321,15 @@ async function layNguoiDung(req) {
       console.error("[Postgres] kiểm tra mã truy cập lỗi, rơi về env var:", e.message);
     }
   }
-  const ten = ACCESS_CODES[ma];
+  // Không dùng ACCESS_CODES[ma] trực tiếp (lookup nhanh có thể lộ mã có tồn
+  // tại hay không qua thời gian phản hồi) — duyệt toàn bộ + so sánh timing-safe.
+  let ten = null;
+  for (const [code, name] of Object.entries(ACCESS_CODES)) {
+    if (soSanhMaAnToan(code, ma)) { ten = name; break; }
+  }
   if (!ten) return null;
-  return { ten, quanTri: !!ADMIN_CODE && ma === ADMIN_CODE };
+  const laAdmin = ADMIN_CODE ? soSanhMaAnToan(ADMIN_CODE, ma) : false;
+  return { ten, quanTri: laAdmin };
 }
 
 async function batBuocDangNhap(req, res, next) {
@@ -679,7 +775,7 @@ function b07_relationship(normalizedItems, ocrData) {
     if (it.evidence_region && nhanTang.length) {
       const tr = it.evidence_region;
       const tangKhop = nhanTang.find((n) => n.evidence_region && Math.abs(n.evidence_region.y - tr.y) < 0.2);
-      if (tangKhop) relationships.push({ objectId: `OBJ-${String(idx + 1).padStart(4, "0")}`, target: tangKhop.text, type: "located_in_floor_GOI_Y" });
+      if (tangKhop) relationships.push({ itemIndex: idx, target: tangKhop.text, type: "located_in_floor_GOI_Y" });
     }
   });
   return {
@@ -788,7 +884,8 @@ function chayPipeline9Buoc(rawItems, soLuongAnh, images, ocrData = null) {
   const b05Trace = b05_scale(b04.ketQua);
   trace.push(b05Trace);
   trace.push(b06_geometry(b04.ketQua));
-  trace.push(b07_relationship(b04.ketQua, ocrData));
+  const b07Res = b07_relationship(b04.ketQua, ocrData);
+  trace.push(b07Res);
   const b08 = b08_takeoff(b04.ketQua);
   trace.push(b08.trace);
   const b09 = b09_reconciliation(b08.ketQua);
@@ -797,7 +894,7 @@ function chayPipeline9Buoc(rawItems, soLuongAnh, images, ocrData = null) {
   const maHieuLech = new Set((b09.canhBaoThat || []).map((c) => c.maHieu));
   const itemsVoiConfidence = b09.ketQua.map((it) => ({ ...it, confidenceMatrix: tinhConfidenceMatrix(it, b05Trace.status, maHieuLech) }));
 
-  return { items: itemsVoiConfidence, pipelineTrace: trace, drawingModel: xayDungDrawingModel(itemsVoiConfidence, images, trace) };
+  return { items: itemsVoiConfidence, pipelineTrace: trace, drawingModel: xayDungDrawingModel(itemsVoiConfidence, images, b07Res.relationships) };
 }
 
 // Cấu trúc đầu ra chuẩn hoá {drawing, pages, objects, evidence, dimensions,
@@ -807,28 +904,71 @@ function chayPipeline9Buoc(rawItems, soLuongAnh, images, ocrData = null) {
 // gian nào đáng tin cho ảnh/PDF) — không bịa dữ liệu vào đây chỉ để "đủ cấu
 // trúc trông đẹp". evidence/dimensions CHỈ có entry cho item THẬT SỰ có dữ
 // liệu đó, không tạo entry rỗng cho mọi item.
-function xayDungDrawingModel(items, images, pipelineTrace) {
+function xayDungDrawingModel(items, images, relationshipsGoc) {
   const pages = (images || []).map((img, i) => ({ page: i + 1, name: img.name || `page-${i + 1}` }));
-  const objects = items.map((it, i) => ({
-    id: `OBJ-${String(i + 1).padStart(4, "0")}`,
-    name: it.name, unit: it.unit, group: it.group || null, calc_type: it.calc_type || null,
-  }));
+
+  // OBJECT-FIRST THẬT: nhóm item theo "object_ref" (nếu AI cung cấp) — cho
+  // phép NHIỀU khối lượng (VD "Xây tường ngoài" + "Sơn tường ngoài") CÙNG
+  // THAM CHIẾU 1 vật thể vật lý duy nhất (đúng bức tường đó), thay vì luôn
+  // sinh object độc lập cho mỗi dòng như trước. Item KHÔNG có object_ref vẫn
+  // tự sinh object riêng (AN TOÀN — không đổi hành vi mặc định khi AI/dữ liệu
+  // cũ chưa dùng trường mới này).
+  const objectIdCuaItem = [];
+  const nhomTheoRef = new Map(); // object_ref -> danh sách index item
+  let demTuSinh = 0;
+  items.forEach((it, i) => {
+    const ref = it.object_ref && typeof it.object_ref === "string" ? it.object_ref.trim() : "";
+    if (ref) {
+      if (!nhomTheoRef.has(ref)) nhomTheoRef.set(ref, []);
+      nhomTheoRef.get(ref).push(i);
+    } else {
+      demTuSinh++;
+      objectIdCuaItem[i] = `OBJ-${String(demTuSinh).padStart(4, "0")}`;
+    }
+  });
+  let demNhom = 0;
+  nhomTheoRef.forEach((indices) => {
+    demNhom++;
+    const id = `OBJ-REF-${String(demNhom).padStart(4, "0")}`;
+    indices.forEach((i) => { objectIdCuaItem[i] = id; });
+  });
+
+  const objectMap = new Map(); // id -> { id, tenVatThe, group, soLuongKhoiLuong }
+  items.forEach((it, i) => {
+    const id = objectIdCuaItem[i];
+    if (!objectMap.has(id)) {
+      objectMap.set(id, { id, name: it.object_ref || it.name, group: it.group || null, calc_type: it.object_ref ? undefined : (it.calc_type || null), soLuongKhoiLuong: 0 });
+    }
+    objectMap.get(id).soLuongKhoiLuong++;
+  });
+  const objects = Array.from(objectMap.values());
+
   const evidence = items
-    .map((it, i) => ({ id: `OBJ-${String(i + 1).padStart(4, "0")}`, it }))
+    .map((it, i) => ({ id: objectIdCuaItem[i], it }))
     .filter((x) => x.it.evidence_region)
     .map((x) => ({ objectId: x.id, region: x.it.evidence_region, citation: x.it.note || "" }));
   const dimensions = items
-    .map((it, i) => ({ id: `OBJ-${String(i + 1).padStart(4, "0")}`, it }))
+    .map((it, i) => ({ id: objectIdCuaItem[i], it }))
     .filter((x) => x.it.formula_inputs)
     .map((x) => ({ objectId: x.id, calc_type: x.it.calc_type, values: x.it.formula_inputs }));
   const quantities = items.map((it, i) => ({
-    id: `QTY-${String(i + 1).padStart(4, "0")}`, objectId: `OBJ-${String(i + 1).padStart(4, "0")}`,
+    id: `QTY-${String(i + 1).padStart(4, "0")}`, objectId: objectIdCuaItem[i],
     name: it.name, unit: it.unit, qty: it.qty, source: it.qty_source || "ai_direct", status: it.qty != null ? "CONFIRMED" : "MISSING",
   }));
+  // SỬA LỖI THẬT (phát hiện qua audit + xác nhận đọc code trực tiếp): trước
+  // đây hàm này LUÔN trả relationships:[] cứng, dù b07_relationship đã tính
+  // đúng relationships thật khi có OCR — kết quả bị "mất tích" ngay trước khi
+  // tới drawingModel. Giờ nhận relationships thật, map itemIndex (chỉ số
+  // trong danh sách gốc trước khi gom nhóm object-first) sang đúng objectId
+  // cuối cùng (có thể là OBJ-xxxx hoặc OBJ-REF-xxxx sau khi gom object_ref).
+  const relationships = (relationshipsGoc || [])
+    .filter((r) => Number.isInteger(r.itemIndex) && objectIdCuaItem[r.itemIndex])
+    .map((r) => ({ objectId: objectIdCuaItem[r.itemIndex], target: r.target, type: r.type }));
+
   return {
-    drawing: { engineVersion: "1.0-gop-chung", generatedAt: new Date().toISOString() },
+    drawing: { engineVersion: "1.1-object-first-tuy-chon", generatedAt: new Date().toISOString() },
     pages, objects, evidence, dimensions,
-    relationships: [], // THẬT SỰ RỖNG — bước 07_RELATIONSHIP đang "blocked", xem pipelineTrace
+    relationships,
     quantities,
   };
 }
@@ -857,7 +997,18 @@ function tinhDienTichTuongBangPolygon(polygonNgoai, cacLoMoPolygon) {
   const loMo = (cacLoMoPolygon || []).map((lo) => [dongKin(lo)]);
   const ketQua = loMo.length ? polygonClipping.difference(ngoai, ...loMo) : ngoai;
   let dienTich = 0;
-  ketQua.forEach((poly) => poly.forEach((ring) => { dienTich += dienTichShoelace(ring); }));
+  // SỬA LỖI THẬT (phát hiện qua test): khi lỗ mở nằm HOÀN TOÀN bên trong tường
+  // (không chạm biên nào — VD lỗ thông gió tròn giữa tường), polygon-clipping
+  // trả về [vành_ngoài, vành_lỗ_trong, ...] — ring ĐẦU TIÊN của mỗi polygon là
+  // vành ngoài (CỘNG), các ring SAU là lỗ bên trong (PHẢI TRỪ, không phải cộng
+  // như code cũ) — test thật: tường 10×10 (100m²) trừ lỗ 2×3 (6m²) giữa tường,
+  // code cũ ra SAI 106m² (thừa gấp đôi diện tích lỗ), sửa xong ra ĐÚNG 94m².
+  ketQua.forEach((poly) => {
+    poly.forEach((ring, idx) => {
+      const dt = dienTichShoelace(ring);
+      dienTich += idx === 0 ? dt : -dt;
+    });
+  });
   return +dienTich.toFixed(4);
 }
 
@@ -1025,6 +1176,10 @@ function locHangMucHopLe(danhSach) {
     .filter((item) => {
       if (!item || typeof item !== "object") return false;
       if (typeof item.name !== "string" || !item.name.trim()) return false;
+      // SỬA LỖI THẬT (phát hiện qua audit): khối lượng KHÔNG CÓ ĐƠN VỊ (m²/m³/cái...)
+      // vô nghĩa cho BOQ/nghiệm thu — trước đây filter không hề kiểm tra, dòng
+      // thiếu/rỗng unit vẫn lọt vào kết quả cuối.
+      if (typeof item.unit !== "string" || !item.unit.trim()) return false;
       if (item.qty === null) return false; // Engine tính lỗi/calc_type lạ -> loại, không đoán bừa
       const qty = Number(item.qty);
       if (!Number.isFinite(qty) || qty < 0) return false; // chặn khối lượng âm/NaN ngay từ backend
@@ -1108,6 +1263,13 @@ const TAKEOFF_PROMPT_GOC =
   '"rong_m": chiều rộng sàn, "day_m": chiều dày sàn (dùng 0.1-0.12 nếu không có số liệu, ghi rõ trong note là giả định)}. ' +
   'App tự tính khối lượng = dai_m × rong_m × day_m (m³). ' +
   '\n\n' +
+  'THÊM trường "object_ref" (TUỲ CHỌN, để trống nếu không chắc) — CHỈ điền khi 2 HẠNG MỤC KHÁC LOẠI CÔNG TÁC ' +
+  'nhưng CHẮC CHẮN 100% mô tả ĐÚNG 1 vật thể vật lý duy nhất (VD "Xây tường ngoài Tầng 1" và "Sơn nước tường ngoài Tầng 1" ' +
+  'là ĐÚNG cùng 1 bức tường đó; "Đào đất móng M1" và "Đổ bê tông móng M1" là ĐÚNG cùng 1 hố móng đó) — điền CÙNG 1 chuỗi ' +
+  'ngắn gọn không dấu (VD "tuong_ngoai_tang1", "mong_M1") cho TẤT CẢ dòng liên quan. NẾU KHÔNG CHẮC CHẮN, hoặc đây là ' +
+  '2 vị trí khác nhau dù cùng loại công tác (VD "Xây tường Phòng 1" và "Xây tường Phòng 2") — ĐỂ TRỐNG, KHÔNG được tự suy ' +
+  'diễn/bịa liên kết chỉ vì tên nghe giống nhau. ' +
+  '\n\n' +
   'BẮT BUỘC TỰ KIỂM CHỨNG (không cần dữ liệu công trình khác — chỉ đối chiếu NGAY TRONG bộ bản vẽ đang đọc): ' +
   'trường "note" của MỌI hạng mục PHẢI ghi rõ CÔNG THỨC TÍNH kèm số liệu cụ thể lấy từ đâu trên bản vẽ (VD "5m dài x 3m cao - 2m2 cửa = 13m2", ' +
   'hoặc "đọc trực tiếp số 23.90m2 ghi trong phòng"), KHÔNG được chỉ ghi 1 câu mô tả chung chung không có số. ' +
@@ -1177,10 +1339,71 @@ function taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) {
 // ============================================================================
 // POST /api/analyze-image   body: { base64, mediaType }
 // ============================================================================
+// Kiểm tra ảnh HỢP LỆ trước khi gọi AI — tránh tốn tiền gọi Claude cho ảnh
+// chắc chắn sẽ đọc lỗi (rỗng, hỏng, hoặc HEIC từ iPhone mà Claude/Vision
+// không đọc được). Đã test 6 kịch bản thật (PNG hợp lệ, file giả, tự bóc
+// data-URL prefix, quá ngắn, thiếu hoàn toàn) — không tự "vá" ảnh trắng,
+// chỉ phát hiện SỚM và báo lỗi rõ ràng, tránh giả kết quả.
+function kiemTraAnhBase64(base64, mediaType) {
+  if (!base64 || typeof base64 !== "string") {
+    return { ok: false, code: "missing", message: "Thiếu dữ liệu ảnh (base64)." };
+  }
+  let b64 = base64;
+  const dataUrl = /^data:([^;]+);base64,(.*)$/i.exec(base64);
+  if (dataUrl) {
+    b64 = dataUrl[2];
+    if (!mediaType && dataUrl[1]) mediaType = dataUrl[1];
+  }
+  b64 = b64.replace(/\s/g, "");
+  if (b64.length < 64) {
+    return { ok: false, code: "too_short", message: "Ảnh base64 quá ngắn — có thể file rỗng hoặc đọc lỗi trên thiết bị." };
+  }
+  let buf;
+  try {
+    buf = Buffer.from(b64, "base64");
+  } catch {
+    return { ok: false, code: "bad_base64", message: "Base64 không hợp lệ." };
+  }
+  if (buf.length < 100) {
+    return { ok: false, code: "too_small", message: `File ảnh chỉ ${buf.length} byte — gần như rỗng/trắng sau nén client.` };
+  }
+  const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+  const isJpg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  const isGif = buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46;
+  const isWebp = buf.length > 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP";
+  if (!isPng && !isJpg && !isGif && !isWebp) {
+    return {
+      ok: false,
+      code: "bad_magic",
+      message: "Không nhận ra định dạng PNG/JPEG/WebP — iPhone HEIC hoặc file hỏng thường gây lỗi này. Hãy xuất JPEG/PNG trước khi tải lên.",
+    };
+  }
+  if (buf.length < 3000) {
+    return {
+      ok: true,
+      warn: "anh_rat_nho",
+      message: "Ảnh < 3KB — có thể bị nén quá mức hoặc gần như trống. Nếu AI không đọc được, thử ảnh gốc độ phân giải cao hơn.",
+      mediaType: mediaType || (isPng ? "image/png" : isJpg ? "image/jpeg" : isWebp ? "image/webp" : mediaType),
+      bytes: buf.length,
+      base64: b64,
+    };
+  }
+  return {
+    ok: true,
+    mediaType: mediaType || (isPng ? "image/png" : isJpg ? "image/jpeg" : isWebp ? "image/webp" : mediaType),
+    bytes: buf.length,
+    base64: b64,
+  };
+}
+
 app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { base64, mediaType, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien } = req.body || {};
-    if (!base64 || !mediaType) return res.status(400).json({ error: "Thiếu base64 hoặc mediaType" });
+    const { base64: rawB64, mediaType: rawMt, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien } = req.body || {};
+    if (!rawB64) return res.status(400).json({ error: "Thiếu base64" });
+    const check = kiemTraAnhBase64(rawB64, rawMt);
+    if (!check.ok) return res.status(400).json({ error: check.message, code: check.code });
+    const base64 = check.base64;
+    const mediaType = check.mediaType || rawMt || "image/jpeg";
     const data = await callUnifiedAI([
       { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
       { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) },
@@ -1189,8 +1412,10 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
     const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "ảnh", ten: req.body?.name || "", ...chiPhi });
     const rawItems = parseRawJsonTuAI(data);
-    const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, 1, [{ base64, name: req.body?.name || "?" }]);
-    res.json({ items, pipelineTrace, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung });
+    // OCR trước pipeline → b07 nhận nhãn tầng (khi VISION_WITH_ANALYZE=1)
+    const ocrBoSung = await layOcrBoSungNeuBat(base64, mediaType);
+    const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, 1, [{ base64, name: req.body?.name || "?" }], ocrBoSung);
+    res.json({ items, pipelineTrace, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung, ocrBoSung });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -1214,7 +1439,28 @@ app.post("/api/ocr-vision", aiLimiter, batBuocDangNhap, async (req, res) => {
     const { base64, mediaType } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Thiếu base64 ảnh." });
     const ketQua = await ocrGoogleVision(base64, mediaType || "image/jpeg", GOOGLE_VISION_API_KEY);
-    res.json(ketQua);
+    res.json({ ...ketQua, cache: thongKeCacheOcr() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Xem thống kê cache OCR (RAM) — hits/misses/apiCalls/dedupeHits — theo dõi
+// hiệu quả tiết kiệm chi phí Google Vision qua thời gian.
+app.get("/api/ocr-vision/cache-stats", batBuocDangNhap, async (req, res) => {
+  try {
+    res.json(thongKeCacheOcr());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Xoá sạch cache OCR (RAM) — dùng khi cần buộc đọc lại bản vẽ đã sửa nhưng
+// vẫn trùng hash cũ (hiếm khi cần, chủ yếu để debug/kiểm tra).
+app.post("/api/ocr-vision/cache-clear", batBuocDangNhap, async (req, res) => {
+  try {
+    const kq = await xoaCacheOcr();
+    res.json({ ok: true, ...kq, cache: thongKeCacheOcr() });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1256,11 +1502,14 @@ app.post("/api/analyze-images-batch", aiLimiter, gioiHanDongThoi, batBuocDangNha
     // Trả kèm danh sách tên ảnh theo ĐÚNG thứ tự đã đánh số, để frontend tra
     // source_image_index -> tên file thật, gán sourcePhoto chính xác từng dòng.
     const rawItems = parseRawJsonTuAI(data);
-    const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, images.length, images);
+    // OCR ảnh đầu (nếu bật) → pipeline b07 dùng nhãn tầng; trả ocrBoSung cho UI/API
+    const ocrBoSung = await layOcrBoSungNeuBat(images[0]?.base64, images[0]?.mediaType || images[0]?.media_type || "image/jpeg");
+    const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, images.length, images, ocrBoSung);
     res.json({
       items, pipelineTrace, cost: chiPhi,
       model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung,
       imageNames: images.map((i) => i.name || "?"),
+      ocrBoSung,
     });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
@@ -1340,8 +1589,10 @@ async function xuLyJobNen(jobId) {
         contentBlocks.push({ type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien) });
         const data = await callUnifiedAI(contentBlocks, undefined, job.provider);
         const rawItems = parseRawJsonTuAI(data);
-        const { items } = chayPipeline9Buoc(rawItems, lo.anh.length, lo.anh);
+        const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, lo.anh.length, lo.anh);
         lo.items = items;
+        lo.pipelineTrace = pipelineTrace;
+        lo.drawingModel = drawingModel;
         lo.trangThai = "xong";
         thanhCong = true;
         const chiPhi = tinhChiPhi(data.usage, undefined, job.provider || AI_PROVIDER);
@@ -1435,28 +1686,118 @@ app.get("/api/jobs/:jobId/result", batBuocDangNhap, (req, res) => {
 // NHƯNG CHƯA gọi mạng thật (không có key OpenAI để test) — dùng thử cẩn thận,
 // báo lỗi ngay nếu gặp vấn đề để vá tiếp.
 // ============================================================================
+// CHIA PDF LỚN THÀNH NHIỀU PHẦN — Claude API có giới hạn CỨNG 100 trang/request
+// (đã xác nhận qua tài liệu chính thức, vượt quá = THẤT BẠI HOÀN TOÀN, không
+// phải cảnh báo nhẹ). Dùng ngưỡng an toàn 90 trang (chừa margin). Dùng pdf-lib
+// (thuần JavaScript, KHÔNG cần binary hệ thống như Poppler — cài được bình
+// thường qua npm install, không cần đổi sang Docker).
+const NGUONG_TRANG_AN_TOAN = 90;
+async function chiaPdfLonNeuCanThiet(base64) {
+  const { PDFDocument } = require("pdf-lib");
+  const bytes = Buffer.from(base64, "base64");
+  const src = await PDFDocument.load(bytes);
+  const tongSoTrang = src.getPageCount();
+  if (tongSoTrang <= NGUONG_TRANG_AN_TOAN) {
+    return { tongSoTrang, cacPhan: [{ base64, tuTrang: 1, denTrang: tongSoTrang }] }; // không cần chia — giữ nguyên hành vi cũ
+  }
+  const cacPhan = [];
+  for (let start = 0; start < tongSoTrang; start += NGUONG_TRANG_AN_TOAN) {
+    const end = Math.min(start + NGUONG_TRANG_AN_TOAN, tongSoTrang);
+    const newDoc = await PDFDocument.create();
+    const indices = [];
+    for (let i = start; i < end; i++) indices.push(i);
+    const copiedPages = await newDoc.copyPages(src, indices);
+    copiedPages.forEach((p) => newDoc.addPage(p));
+    const outBytes = await newDoc.save();
+    cacPhan.push({ base64: Buffer.from(outBytes).toString("base64"), tuTrang: start + 1, denTrang: end });
+  }
+  return { tongSoTrang, cacPhan };
+}
+
+async function xuLyJobPdfLon(jobId) {
+  const job = docJob(jobId);
+  if (!job) return;
+  const SO_LAN_THU_LO = 3;
+  for (let i = 0; i < job.cacLo.length; i++) {
+    const lo = job.cacLo[i];
+    if (lo.trangThai === "xong") continue;
+    lo.trangThai = "dang_chay";
+    ghiJob(job);
+
+    let thanhCong = false, loiLanCuoi = "";
+    for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
+      try {
+        const contentBlocks = [
+          { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
+          { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien) },
+        ];
+        const data = await callUnifiedAI(contentBlocks, "pdfs-2024-09-25", job.provider);
+        const rawItems = parseRawJsonTuAI(data);
+        const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ name: `${job.tenFile || "document.pdf"} (trang ${lo.tuTrang}-${lo.denTrang})` }]);
+        lo.items = items;
+        lo.pipelineTrace = pipelineTrace;
+        lo.drawingModel = drawingModel;
+        lo.trangThai = "xong";
+        thanhCong = true;
+        const chiPhi = tinhChiPhi(data.usage, undefined, job.provider || AI_PROVIDER);
+        lo.chiPhi = chiPhi;
+        ghiNhatKy({ luc: new Date().toISOString(), nguoi: job.nguoi, loai: `Job PDF phần ${i + 1}/${job.cacLo.length}`, ten: job.jobId, ...chiPhi });
+        break;
+      } catch (e) {
+        loiLanCuoi = e.message;
+        if (lanThu < SO_LAN_THU_LO) await new Promise((r) => setTimeout(r, 5000 * lanThu));
+      }
+    }
+    if (!thanhCong) { lo.trangThai = "loi"; lo.loi = loiLanCuoi; }
+    ghiJob(job);
+  }
+  job.trangThaiTong = job.cacLo.every((l) => l.trangThai === "xong") ? "xong" : "co_loi";
+  ghiJob(job);
+}
+
 app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
     const { base64, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Thiếu base64" });
-    const data = await callUnifiedAI(
-      [
-        { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-        { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) },
-      ],
-      "pdfs-2024-09-25",
-      provider
-    );
-    const hangDaDung = provider || AI_PROVIDER;
-    const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
-    ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: `PDF (${hangDaDung})`, ten: req.body?.name || "", ...chiPhi });
-    // SỬA LỖI: trước đây endpoint PDF dùng extractJsonArray đơn giản, KHÔNG đi
-    // qua pipeline 9 bước như 2 endpoint ảnh — nghĩa là PDF không có
-    // pipelineTrace, không tự tính lại qty tường bằng bước riêng biệt minh
-    // bạch. Giờ đồng bộ cả 3 luồng đọc (ảnh đơn/gộp/PDF) qua cùng 1 pipeline.
-    const rawItems = parseRawJsonTuAI(data);
-    const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, 1, [{ base64: "", name: req.body?.name || "document.pdf" }]);
-    res.json({ items, pipelineTrace, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung });
+
+    const { tongSoTrang, cacPhan } = await chiaPdfLonNeuCanThiet(base64);
+
+    // PDF NHỎ (≤90 trang) — GIỮ NGUYÊN HÀNH VI CŨ Y HỆT, gọi 1 lần, trả kết quả ngay
+    if (cacPhan.length === 1) {
+      const data = await callUnifiedAI(
+        [
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+          { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) },
+        ],
+        "pdfs-2024-09-25",
+        provider
+      );
+      const hangDaDung = provider || AI_PROVIDER;
+      const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
+      ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: `PDF (${hangDaDung})`, ten: req.body?.name || "", ...chiPhi });
+      const rawItems = parseRawJsonTuAI(data);
+      const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, 1, [{ base64: "", name: req.body?.name || "document.pdf" }]);
+      return res.json({ items, pipelineTrace, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung, tongSoTrang });
+    }
+
+    // PDF LỚN (>90 trang) — TỰ ĐỘNG chuyển sang xử lý dạng Job nền, giống ảnh
+    if (soJobDangChayNen >= GIOI_HAN_JOB_DONG_THOI) {
+      return res.status(429).json({ error: `Đang có ${soJobDangChayNen} job lớn chạy nền — chờ job hiện tại xong rồi thử lại.` });
+    }
+    const jobId = uidBackend("job");
+    const job = {
+      jobId, taoLuc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?",
+      loai: "pdf_lon", tongSoTrang, tenFile: req.body?.name || "document.pdf",
+      ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien,
+      tongSoLo: cacPhan.length,
+      cacLo: cacPhan.map((p, idx) => ({ soLo: idx + 1, pdfBase64: p.base64, tuTrang: p.tuTrang, denTrang: p.denTrang, trangThai: "cho", items: [], loi: null })),
+      trangThaiTong: "dang_chay",
+    };
+    ghiJob(job);
+    soJobDangChayNen++;
+    xuLyJobPdfLon(jobId).catch((e) => console.error("[Job PDF] Lỗi:", jobId, e.message)).finally(() => { soJobDangChayNen = Math.max(0, soJobDangChayNen - 1); });
+    res.json({ jobId, tongSoTrang, tongSoLo: cacPhan.length, trangThai: "dang_chay", ghiChu: `PDF có ${tongSoTrang} trang, vượt ngưỡng an toàn ${NGUONG_TRANG_AN_TOAN} trang của Claude API — tự động chia thành ${cacPhan.length} phần, xử lý nền.` });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -1637,7 +1978,7 @@ app.get("/health", (req, res) =>
     model: ANTHROPIC_MODEL,
     auth: CO_PHAN_QUYEN,
     storage: process.env.DATABASE_URL && pgStore ? "postgres" : "file",
-    vision: { enabled: !!ocrGoogleVision, withAnalyze: VISION_WITH_ANALYZE, hasKey: !!GOOGLE_VISION_API_KEY },
+    vision: { enabled: !!ocrGoogleVision, withAnalyze: VISION_WITH_ANALYZE, hasKey: !!GOOGLE_VISION_API_KEY, cache: thongKeCacheOcr() },
     goLive: { backup: true, multiImage: true, pdf: true, ocrVision: !!ocrGoogleVision },
   })
 );
@@ -1655,8 +1996,38 @@ const AI_PROVIDER = process.env.AI_PROVIDER || "claude";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
+// OCR Google khi VISION_WITH_ANALYZE=1:
+//  - Truyền vào chayPipeline9Buoc → b07_relationship (nhãn tầng PARTIAL)
+//  - Trả field ocrBoSung trong JSON (evidence + goiYSoDo) — KHÔNG ghi đè qty
+async function layOcrBoSungNeuBat(base64, mediaType) {
+  if (!VISION_WITH_ANALYZE || !ocrGoogleVision || !base64) return null;
+  try {
+    return await ocrGoogleVision(base64, mediaType || "image/jpeg", GOOGLE_VISION_API_KEY);
+  } catch (e) {
+    console.error("[OCR Vision bổ sung] lỗi (không chặn analyze):", e.message);
+    return { error: e.message, items: [], goiYSoDo: [] };
+  }
+}
+
 async function callUnifiedAI(contentBlocks, betaHeader, providerOverride) {
   const provider = providerOverride || AI_PROVIDER;
+
+  // SỬA LỖI THẬT (phát hiện qua báo cáo thực tế): trước đây nếu CHỌN RÕ 1
+  // hãng (VD Gemini) nhưng server THIẾU KEY, code ÂM THẦM rơi về gọi Claude ở
+  // dòng cuối hàm — KHÔNG BÁO LỖI GÌ — khiến người dùng THẤY LỖI CỦA CLAUDE dù
+  // đã chọn Gemini, GÂY NHẦM LẪN NGHIÊM TRỌNG (tưởng đang test đúng Gemini
+  // nhưng thực ra vẫn đang gọi Claude). Giờ: nếu providerOverride CHỈ ĐỊNH RÕ
+  // 1 hãng cụ thể mà THIẾU KEY, BÁO LỖI RÕ RÀNG NGAY, không âm thầm đổi hãng.
+  if (providerOverride === "gemini" && !GEMINI_API_KEY) {
+    const err = new Error("Đã chọn Gemini nhưng server CHƯA có GEMINI_API_KEY — vào Render → Environment thêm đúng tên biến này, hoặc chọn lại hãng Claude.");
+    err.status = 400;
+    throw err;
+  }
+  if (providerOverride === "openai" && !OPENAI_API_KEY) {
+    const err = new Error("Đã chọn OpenAI nhưng server CHƯA có OPENAI_API_KEY — vào Render → Environment thêm đúng tên biến này, hoặc chọn lại hãng Claude.");
+    err.status = 400;
+    throw err;
+  }
 
   if (provider === "openai" && OPENAI_API_KEY) {
     const messages = [{

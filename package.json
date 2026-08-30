@@ -1,6 +1,6 @@
 {
   "name": "qs-estimate-backend",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Backend trung gian cho QsEstimateApp — AI đọc bản vẽ, storage theo user, backup/restore.",
   "main": "server.js",
   "scripts": {
@@ -14,7 +14,8 @@
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
     "pg": "^8.13.0",
-    "polygon-clipping": "^0.15.7"
+    "polygon-clipping": "^0.15.7",
+    "pdf-lib": "^1.17.1"
   },
   "engines": {
     "node": ">=18"

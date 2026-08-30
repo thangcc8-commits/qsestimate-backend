@@ -23,6 +23,8 @@ function ketNoiDb() {
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }, // Render Postgres cần SSL, cấu hình sẵn cho đúng
     idleTimeoutMillis: 30000, // Chủ động đóng client rảnh sau 30s — SỚM HƠN Render tự ngắt, giảm khả năng gặp "kết nối đã chết nhưng client chưa biết"
+    max: 10, // Giới hạn tối đa 10 connection cùng lúc — viết tường minh thay vì dựa giá trị mặc định ẩn của thư viện pg, dễ đọc/điều chỉnh sau này
+    connectionTimeoutMillis: 5000, // Nếu pool bị kẹt (quá tải), query mới TỰ THẤT BẠI sau 5s thay vì treo vô thời hạn
   });
   // QUAN TRỌNG: pg Pool phát ra sự kiện "error" khi 1 client ĐANG RẢNH RỖI
   // (không phải lúc chạy query) gặp lỗi kết nối (Postgres tự ngắt, mạng chập
