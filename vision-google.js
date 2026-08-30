@@ -200,6 +200,28 @@ async function ghiCache(key, result) {
   }
 }
 
+// Trích xuất textAnnotations-tương-đương TỪ fullTextAnnotation (dùng khi
+// DOCUMENT_TEXT_DETECTION trả textAnnotations rỗng) — DÙNG CHUNG cho cả hàm
+// đơn lẻ và batch, tránh 1 chỗ sửa mà chỗ kia quên (đã xảy ra thật — batch
+// từng thiếu fallback này dù hàm đơn lẻ đã sửa).
+function trichXuatTuFullTextAnnotation(fullTextAnnotation) {
+  const anns = [{ description: "", boundingPoly: { vertices: [] } }]; // giữ chỗ — parseAnnotations() luôn slice(1)
+  const pages = fullTextAnnotation?.pages || [];
+  pages.forEach((page) => {
+    (page.blocks || []).forEach((block) => {
+      (block.paragraphs || []).forEach((para) => {
+        (para.words || []).forEach((word) => {
+          const text = (word.symbols || []).map((s) => s.text || "").join("");
+          if (text && word.boundingBox?.vertices) {
+            anns.push({ description: text, boundingPoly: { vertices: word.boundingBox.vertices } });
+          }
+        });
+      });
+    });
+  });
+  return anns;
+}
+
 /**
  * OCR 1 ảnh — có cache + in-flight dedupe
  */
@@ -250,6 +272,7 @@ async function ocrGoogleVision(base64, mediaType, apiKey, opts = {}) {
         imageContext: { languageHints: ["vi", "en"] },
       },
     ]);
+
     if (data.responses?.[0]?.error) {
       throw new Error(`Google Vision: ${data.responses[0].error.message}`);
     }
@@ -258,29 +281,7 @@ async function ocrGoogleVision(base64, mediaType, apiKey, opts = {}) {
     // DOCUMENT_TEXT_DETECTION: fullTextAnnotation; TEXT_DETECTION: textAnnotations
     let anns = textAnnotations;
     if ((!anns || anns.length === 0) && data.responses?.[0]?.fullTextAnnotation) {
-      // SỬA LỖI THẬT (phát hiện qua audit): trước đây dòng này chỉ gán lại
-      // CHÍNH textAnnotations (vẫn rỗng) — không hề trích xuất gì từ
-      // fullTextAnnotation. Cấu trúc thật (theo tài liệu Google): pages[] →
-      // blocks[] → paragraphs[] → words[] → symbols[] (mỗi word là MẢNG ký tự
-      // rời, cần ghép lại thành text; symbols không có field "text" gộp sẵn).
-      // parseAnnotations() luôn slice(1) bỏ phần tử [0] — đúng quy ước
-      // textAnnotations thật của Google (phần tử [0] LUÔN là toàn văn bản gộp
-      // cả trang). Mảng tự tạo từ fullTextAnnotation KHÔNG có quy ước này —
-      // thêm phần tử giữ chỗ để không bị mất từ ĐẦU TIÊN thật khi slice(1).
-      anns = [{ description: "", boundingPoly: { vertices: [] } }];
-      const pages = data.responses[0].fullTextAnnotation.pages || [];
-      pages.forEach((page) => {
-        (page.blocks || []).forEach((block) => {
-          (block.paragraphs || []).forEach((para) => {
-            (para.words || []).forEach((word) => {
-              const text = (word.symbols || []).map((s) => s.text || "").join("");
-              if (text && word.boundingBox?.vertices) {
-                anns.push({ description: text, boundingPoly: { vertices: word.boundingBox.vertices } });
-              }
-            });
-          });
-        });
-      });
+      anns = trichXuatTuFullTextAnnotation(data.responses[0].fullTextAnnotation);
     }
     const kichThuocAnh = layKichThuocAnh(base64, mediaType);
     const result = parseAnnotations(anns, kichThuocAnh);
@@ -359,7 +360,14 @@ async function ocrGoogleVisionBatch(images, apiKey, opts = {}) {
         continue;
       }
       const kichThuocAnh = layKichThuocAnh(it.base64, it.mediaType);
-      const result = parseAnnotations(resp.textAnnotations || [], kichThuocAnh);
+      // SỬA LỖI THẬT (phát hiện qua audit): batch trước đây CHỈ đọc
+      // resp.textAnnotations, thiếu hẳn fallback fullTextAnnotation mà hàm
+      // đơn lẻ đã có — dùng DOCUMENT_TEXT_DETECTION qua batch sẽ mất evidence.
+      let annsBatch = resp.textAnnotations || [];
+      if ((!annsBatch || annsBatch.length === 0) && resp.fullTextAnnotation) {
+        annsBatch = trichXuatTuFullTextAnnotation(resp.fullTextAnnotation);
+      }
+      const result = parseAnnotations(annsBatch, kichThuocAnh);
       await ghiCache(it.key, result);
       results[it.index] = { ...result, fromCache: false, cacheLayer: "api_batch" };
     }
