@@ -1,0 +1,44 @@
+ame: Regression Test (BOQ Engine)
+
+# Chạy TỰ ĐỘNG mỗi khi có push hoặc Pull Request vào nhánh main — dùng đúng
+# file regression_test.js đã có sẵn, không cần viết thêm gì khác. Nếu 1 bài
+# test fail, GitHub sẽ báo đỏ ngay trên trang repo + email cho chú, không cần
+# tự nhớ chạy tay trước khi deploy nữa.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy code mới nhất
+        uses: actions/checkout@v4
+
+      - name: Cài Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cài dependency (npm install)
+        run: npm install
+        # SỬA LỖI THẬT: workflow trước đây THIẾU bước này — regression_test.js
+        # và golden_dataset_test.js cần polygon-clipping/pdf-lib (require trực
+        # tiếp), thiếu bước cài đặt này sẽ khiến job THẤT BẠI ngay lập tức với
+        # lỗi "Cannot find module 'polygon-clipping'".
+
+      - name: Chạy bộ kiểm tra hồi quy (logic công thức)
+        run: node regression_test.js
+        # Nếu regression_test.js exit code != 0 (có test fail), bước này tự
+        # động fail, GitHub tự đánh dấu đỏ — không cần cấu hình gì thêm.
+
+      - name: Chạy Golden Dataset (độ chính xác THẬT so với công trình đã nghiệm thu)
+        run: node golden_dataset_test.js
+        # KHÁC với bước trên — bước này so sánh khối lượng app tự tính với khối
+        # lượng QS đã kiểm tra thật ngoài công trường (xem golden-dataset.json).
+        # Đã có 3 entry thật (Nhà phố Gò Vấp + Shophouse Thủ Đức, sai số trung
+        # bình 1.33%) — nếu có project nào lệch quá ngưỡng dung sai (mặc định
+        # 5%), build sẽ TỰ ĐỘNG bị chặn ở đây. Cần tiếp tục bổ sung thêm công
+        # trình thật để mẫu đủ lớn, đáng tin cậy hơn.
