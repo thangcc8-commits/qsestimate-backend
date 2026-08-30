@@ -27,6 +27,12 @@
 // nếu muốn dùng file .env thì chạy bằng: node --env-file=.env server.js (Node 20+).
 const express = require("express");
 const cors = require("cors");
+// Soft-require: polygon-clipping cần cho tính diện tích tường có lỗ mở phức
+// tạp — nếu chưa cài (VD môi trường CI/local quên "npm install"), báo lỗi RÕ
+// RÀNG khi thực sự dùng tới, thay vì "Cannot find module" khó hiểu lúc chạy.
+let polygonClipping = null;
+try { polygonClipping = require("polygon-clipping"); }
+catch (e) { console.error("✗ Thiếu package 'polygon-clipping' — chạy 'npm install' trước khi dùng tính năng tính diện tích tường có lỗ mở. Lỗi gốc:", e.message); }
 const rateLimit = require("express-rate-limit");
 const fs = require("fs");
 const path = require("path");
@@ -982,7 +988,7 @@ function xayDungDrawingModel(items, images, relationshipsGoc) {
 // SAI — đã kiểm chứng bằng test: cách cũ ra 9m², polygon boolean ra ĐÚNG 10m²
 // cho 2 cửa chồng lấn 1m²).
 function tinhDienTichTuongBangPolygon(polygonNgoai, cacLoMoPolygon) {
-  const polygonClipping = require("polygon-clipping");
+  if (!polygonClipping) throw new Error("Thiếu package 'polygon-clipping' trên server — chạy 'npm install' rồi khởi động lại. Không thể tính diện tích tường có lỗ mở.");
   function dienTichShoelace(vertices) {
     let s = 0;
     for (let i = 0; i < vertices.length - 1; i++) s += vertices[i][0] * vertices[i + 1][1] - vertices[i + 1][0] * vertices[i][1];
@@ -1426,18 +1432,26 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
     if (!check.ok) return res.status(400).json({ error: check.message, code: check.code });
     const base64 = check.base64;
     const mediaType = check.mediaType || rawMt || "image/jpeg";
-    const data = await callUnifiedAI([
-      { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-      { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) },
-    ], undefined, provider);
+    // SỬA LỖI THẬT: trước đây Claude và OCR chạy TUẦN TỰ (OCR chờ Claude xong
+    // mới bắt đầu), dù OCR không phụ thuộc kết quả Claude (chỉ cần base64/
+    // mediaType đã có sẵn từ trước) — gây độ trễ cộng dồn không cần thiết khi
+    // bật VISION_WITH_ANALYZE. Giờ chạy song song bằng Promise.all.
+    const [data, ocrBoSung] = await Promise.all([
+      callUnifiedAI([
+        { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+        { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) },
+      ], undefined, provider),
+      layOcrBoSungNeuBat(base64, mediaType),
+    ]);
     const hangDaDung = provider || AI_PROVIDER;
     const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
     ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "ảnh", ten: req.body?.name || "", ...chiPhi });
     const rawItems = parseRawJsonTuAI(data);
-    // OCR trước pipeline → b07 nhận nhãn tầng (khi VISION_WITH_ANALYZE=1)
-    const ocrBoSung = await layOcrBoSungNeuBat(base64, mediaType);
-    const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, 1, [{ base64, name: req.body?.name || "?" }], ocrBoSung);
-    res.json({ items, pipelineTrace, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung, ocrBoSung });
+    const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ base64, name: req.body?.name || "?" }], ocrBoSung);
+    // SỬA LỖI THẬT: drawingModel được Engine tính ra đầy đủ nhưng trước đây
+    // KHÔNG BAO GIỜ được trả về response — frontend mất toàn bộ object/
+    // evidence/relationships dù backend đã tính đúng.
+    res.json({ items, pipelineTrace, drawingModel, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung, ocrBoSung });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -1526,9 +1540,9 @@ app.post("/api/analyze-images-batch", aiLimiter, gioiHanDongThoi, batBuocDangNha
     const rawItems = parseRawJsonTuAI(data);
     // OCR ảnh đầu (nếu bật) → pipeline b07 dùng nhãn tầng; trả ocrBoSung cho UI/API
     const ocrBoSung = await layOcrBoSungNeuBat(images[0]?.base64, images[0]?.mediaType || images[0]?.media_type || "image/jpeg");
-    const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, images.length, images, ocrBoSung);
+    const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, images.length, images, ocrBoSung);
     res.json({
-      items, pipelineTrace, cost: chiPhi,
+      items, pipelineTrace, drawingModel, cost: chiPhi,
       model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung,
       imageNames: images.map((i) => i.name || "?"),
       ocrBoSung,
@@ -1799,8 +1813,8 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
       const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
       ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: `PDF (${hangDaDung})`, ten: req.body?.name || "", ...chiPhi });
       const rawItems = parseRawJsonTuAI(data);
-      const { items, pipelineTrace } = chayPipeline9Buoc(rawItems, 1, [{ base64: "", name: req.body?.name || "document.pdf" }]);
-      return res.json({ items, pipelineTrace, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung, tongSoTrang });
+      const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ base64: "", name: req.body?.name || "document.pdf" }]);
+      return res.json({ items, pipelineTrace, drawingModel, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung, tongSoTrang });
     }
 
     // PDF LỚN (>90 trang) — TỰ ĐỘNG chuyển sang xử lý dạng Job nền, giống ảnh
@@ -2001,6 +2015,7 @@ app.get("/health", (req, res) =>
     auth: CO_PHAN_QUYEN,
     storage: process.env.DATABASE_URL && pgStore ? "postgres" : "file",
     vision: { enabled: !!ocrGoogleVision, withAnalyze: VISION_WITH_ANALYZE, hasKey: !!GOOGLE_VISION_API_KEY, cache: thongKeCacheOcr() },
+    providers: { claude: !!ANTHROPIC_API_KEY, gemini: !!process.env.GEMINI_API_KEY, openai: !!process.env.OPENAI_API_KEY },
     goLive: { backup: true, multiImage: true, pdf: true, ocrVision: !!ocrGoogleVision },
   })
 );
