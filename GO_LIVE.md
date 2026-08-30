@@ -37,9 +37,9 @@ sung tự động, tính phí riêng Google), `ACCESS_CODES`, `ADMIN_CODE`, `RAT
 - Rate limit riêng cho AI (60 lượt/15 phút) + rate limit chung toàn `/api/*` (300 lượt/15 phút)
 
 ## Golden Dataset — đo độ chính xác thật
-Hiện có **3 entry thật** từ 2 công trình đã nghiệm thu (Nhà phố Gò Vấp, Shophouse Thủ Đức) —
-sai số trung bình đo được **1.33%**. Đây chỉ là khởi đầu, chưa đủ để kết luận cho toàn hệ thống —
-cần tiếp tục bổ sung công trình mới vào `golden-dataset.json` mỗi khi có dự án nghiệm thu xong.
+Hiện **chưa có dữ liệu thật nào** — 3 entry cũ (Nhà phố Gò Vấp, Shophouse Thủ Đức) đã bị xoá vì
+không chính xác. Đây chỉ là khởi đầu, **chưa thể tuyên bố % chính xác nào cho hệ thống** cho tới
+khi có công trình đã nghiệm thu thật được bổ sung vào `golden-dataset.json`.
 CI (`.github/workflows/regression.yml`) tự chạy `golden_dataset_test.js` mỗi lần push — nếu 1
 project lệch quá ngưỡng dung sai (mặc định 5%), build tự động bị chặn.
 

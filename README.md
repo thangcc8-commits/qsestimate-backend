@@ -33,8 +33,9 @@
 - **Quan hệ không gian giữa các cấu kiện (Cột↔Tầng...) cho ảnh/PDF chỉ là gợi ý tham khảo**, không
   phải kết luận chắc chắn — vì AI Vision không cho toạ độ pixel chính xác tuyệt đối. Luôn báo trạng
   thái `partial`, không bao giờ `done`.
-- Golden Dataset hiện có **3 điểm dữ liệu thật** (2 công trình) — đủ để có tín hiệu ban đầu, **chưa
-  đủ để tuyên bố % chính xác cho toàn hệ thống**. Cần tiếp tục bổ sung.
+- Golden Dataset hiện **chưa có dữ liệu thật nào** (3 entry cũ — Gò Vấp/Thủ Đức — đã bị xoá vì
+  không chính xác) — **chưa thể tuyên bố % chính xác nào cho hệ thống** cho tới khi có dữ liệu
+  nghiệm thu thật mới.
 - Đọc bản vẽ kiến trúc không tự suy ra được dữ liệu kết cấu (dầm/sàn/móng) nếu bản vẽ đó không có —
   các hạng mục này thường nằm ở bộ bản vẽ kết cấu riêng.
 
