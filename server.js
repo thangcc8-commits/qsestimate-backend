@@ -844,6 +844,10 @@ function b09_reconciliation(items) {
     itemsMoi.push({
       name: `⚠ REVIEW — Đối chiếu chéo mã hiệu "${cb.maHieu}"`,
       unit: "chênh lệch", qty: cb.chenhLech, group: "hoanthien", qty_source: "engine_reconciliation",
+      laCanhBao: true, // SỬA LỖI THẬT (phát hiện qua audit): trước đây không có cờ này —
+      // dòng cảnh báo (không phải vật tư thật) lẫn vào BOQ cùng nhóm "hoanthien"
+      // với vật tư thật, có thể bị cộng nhầm vào tổng tiền. Frontend cần đọc cờ
+      // này để tách riêng, KHÔNG đưa vào danh sách BOQ items.
       note: `Engine TỰ PHÁT HIỆN (không phải AI tự viết): mã "${cb.maHieu}" — ${chiTietNguon} — CHÊNH LỆCH ${cb.chenhLech}. Kiểm tra lại: có thể 1 nguồn đếm thiếu/thừa, hoặc 2 nguồn thực sự không khớp (lỗi hồ sơ thiết kế thật, cần báo lại đơn vị thiết kế).`,
     });
   });
