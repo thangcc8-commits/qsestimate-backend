@@ -198,7 +198,10 @@ const MA_LOI_TAM_THOI = new Set([429, 500, 502, 503, 504]);
 // fetch() không có giới hạn thời gian, nếu API bên hãng bị treo, request có
 // thể chờ vô thời hạn (chiếm tài nguyên server, người dùng nhìn màn hình xoay
 // mãi không dừng). 90 giây đủ rộng cho ảnh/PDF phức tạp, không quá ngắn.
-const AI_TIMEOUT_MS = 90_000;
+const AI_TIMEOUT_MS = 180_000; // 90s -> 180s: chẩn đoán thật từ triệu chứng người dùng
+// (PDF 50-89 trang, dưới ngưỡng chia job 90 trang nên gọi 1 lần duy nhất, cần
+// nhiều thời gian hơn 90s để Claude đọc hết + sinh danh sách BOQ dài) — lỗi
+// đúng là do AbortController CỦA APP tự ngắt ở 90s, không phải Render cắt.
 async function fetchCoTimeout(url, options) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
@@ -224,7 +227,13 @@ async function callClaude(contentBlocks, betaHeader) {
   if (betaHeader) headers["anthropic-beta"] = betaHeader;
   const body = JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 16000, messages: [{ role: "user", content: contentBlocks }] });
 
-  const SO_LAN_TOI_DA = 3; // 1 lần gốc + tối đa 2 lần thử lại
+  const SO_LAN_TOI_DA = 3; // 1 lần gốc + tối đa 2 lần thử lại (lỗi mạng thật)
+  const SO_LAN_TOI_DA_TIMEOUT = 2; // 1 lần gốc + 1 lần thử lại — SỬA LỖI THẬT
+  // (chẩn đoán từ triệu chứng người dùng): timeout thật (504, AbortController
+  // tự ngắt vì AI cần nhiều thời gian hơn) thử lại với CÙNG nội dung/timeout
+  // sẽ CHẮC CHẮN timeout y hệt — retry đủ 3 lần chỉ làm người dùng chờ vô ích
+  // (90s×3=270s trước đây, nay 180s×3=540s). Lỗi mạng ngẫu nhiên khác (đứt kết
+  // nối thoáng qua) vẫn đáng thử đủ 3 lần như cũ.
   let loiCuoi;
   for (let lan = 1; lan <= SO_LAN_TOI_DA; lan++) {
     let resp;
@@ -233,9 +242,13 @@ async function callClaude(contentBlocks, betaHeader) {
     } catch (netErr) {
       // Lỗi mạng thật (đứt kết nối, timeout) — tạm thời, đáng thử lại
       loiCuoi = netErr;
-      if (lan < SO_LAN_TOI_DA) { await new Promise((r) => setTimeout(r, 1000 * lan)); continue; }
-      const err = new Error(`Không kết nối được tới Claude API sau ${SO_LAN_TOI_DA} lần thử: ${netErr.message}`);
-      err.status = 503;
+      const laTimeoutThat = netErr.status === 504;
+      const gioiHanLanNay = laTimeoutThat ? SO_LAN_TOI_DA_TIMEOUT : SO_LAN_TOI_DA;
+      if (lan < gioiHanLanNay) { await new Promise((r) => setTimeout(r, 1000 * lan)); continue; }
+      const err = new Error(laTimeoutThat
+        ? netErr.message // giữ nguyên thông báo timeout rõ ràng, không bọc thêm "sau N lần thử"
+        : `Không kết nối được tới Claude API sau ${SO_LAN_TOI_DA} lần thử: ${netErr.message}`);
+      err.status = laTimeoutThat ? 504 : 503;
       throw err;
     }
 
