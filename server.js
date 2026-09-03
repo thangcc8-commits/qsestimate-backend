@@ -693,8 +693,12 @@ function b03_extract(soLuongAnh) {
 }
 
 function b04_normalize(rawItems) {
-  const normalized = locHangMucHopLe(rawItems);
-  return { ketQua: normalized, trace: { step: "04_NORMALIZE", status: "done", detail: `${rawItems.length} dòng thô → ${normalized.length} dòng hợp lệ (đã lọc rác, chuẩn hoá evidence_region)` } };
+  const canhBao = [];
+  const normalized = locHangMucHopLe(rawItems, canhBao);
+  const chiTietMat = canhBao.length
+    ? ` ⚠ ${canhBao.length} dòng AI đọc được nhưng KHÔNG đưa vào BOQ: ${canhBao.slice(0, 10).map((c) => `"${c.ten}" (${c.lyDo})`).join("; ")}${canhBao.length > 10 ? `... và ${canhBao.length - 10} dòng khác` : ""}.`
+    : "";
+  return { ketQua: normalized, canhBaoMat: canhBao, trace: { step: "04_NORMALIZE", status: "done", detail: `${rawItems.length} dòng thô → ${normalized.length} dòng hợp lệ (đã lọc rác, chuẩn hoá evidence_region).${chiTietMat}` } };
 }
 
 // Khổ giấy chuẩn (chiều rộng, mm, đặt dọc) — dùng để tính scale LÝ THUYẾT khi
@@ -1184,7 +1188,7 @@ const DON_VI_DUNG_THEO_CALC_TYPE = {
   tinh_tu_kich_thuoc_san: "m3",
 };
 
-function locHangMucHopLe(danhSach) {
+function locHangMucHopLe(danhSach, canhBaoRa) {
   return (danhSach || [])
     .map((raw) => {
       // Clone nông — không sửa object gốc từ parseRawJsonTuAI.
@@ -1200,9 +1204,12 @@ function locHangMucHopLe(danhSach) {
         item.qty = qtyThat; // null nếu formula_inputs thiếu/hỏng -> dòng này bị lọc bỏ ở bước dưới
         item.note = (item.note || "") + ` [Engine tự tính: ${congThuc.moTa(item.formula_inputs)} = ${qtyThat != null ? qtyThat : "LỖI"} — không dùng bất kỳ số nào AI có thể đã tự đưa]`;
         item.qty_source = "app_formula";
-        // SỬA LỖI THẬT: nếu calc_type có đơn vị CHẮC CHẮN (tường=m², cột/dầm/
-        // móng/sàn=m³), TỰ ĐỘNG ÉP ĐÚNG — không tin unit AI báo cáo (có thể
-        // nhầm m²/m³, VD AI gõ "m2" cho dòng tính bê tông cột đáng lẽ m³).
+        if (qtyThat == null && canhBaoRa) {
+          // SỬA LỖI THẬT: trước đây dòng này bị loại HOÀN TOÀN ÂM THẦM, không
+          // ghi lại gì — người dùng không biết AI đã đọc được hạng mục này
+          // nhưng formula_inputs thiếu/hỏng khiến Engine không tính ra qty được.
+          canhBaoRa.push({ ten: item.name || "(không tên)", lyDo: `calc_type "${item.calc_type}" đúng nhưng formula_inputs thiếu/sai — Engine không tính ra được số` });
+        }
         const donViDung = DON_VI_DUNG_THEO_CALC_TYPE[item.calc_type];
         if (donViDung && item.unit !== donViDung) {
           const unitCu = item.unit;
@@ -1213,6 +1220,14 @@ function locHangMucHopLe(danhSach) {
         // calc_type thiếu/không nhận diện được -> KHÔNG có cách nào tính ra
         // qty đáng tin -> loại bỏ, không đoán bừa.
         item.qty = null;
+        if (canhBaoRa) {
+          // SỬA LỖI THẬT (phát hiện qua điều tra kiến trúc, đúng nguyên nhân
+          // "app đọc ra ít hạng mục hơn hẳn chat AI trực tiếp"): AI CÓ THỂ đã
+          // đọc đúng, đầy đủ hạng mục này — nhưng nếu dùng calc_type không
+          // khớp đúng 1 trong 7 loại app hiểu, dòng bị XOÁ HOÀN TOÀN, ÂM THẦM,
+          // không cảnh báo gì — người dùng tưởng nhầm là "AI không đọc được".
+          canhBaoRa.push({ ten: item.name || "(không tên)", lyDo: item.calc_type ? `calc_type "${item.calc_type}" không phải 1 trong 7 loại app hiểu được (bị loại)` : `AI không điền calc_type cho dòng này (bị loại)` });
+        }
       }
       if (item.evidence_region !== undefined) item.evidence_region = chuanHoaEvidenceRegion(item.evidence_region);
       if (item.confidence !== undefined) item.confidence = chuanHoaConfidence(item.confidence);
@@ -1224,10 +1239,16 @@ function locHangMucHopLe(danhSach) {
       // SỬA LỖI THẬT (phát hiện qua audit): khối lượng KHÔNG CÓ ĐƠN VỊ (m²/m³/cái...)
       // vô nghĩa cho BOQ/nghiệm thu — trước đây filter không hề kiểm tra, dòng
       // thiếu/rỗng unit vẫn lọt vào kết quả cuối.
-      if (typeof item.unit !== "string" || !item.unit.trim()) return false;
-      if (item.qty === null) return false; // Engine tính lỗi/calc_type lạ -> loại, không đoán bừa
+      if (typeof item.unit !== "string" || !item.unit.trim()) {
+        if (canhBaoRa && item.qty != null) canhBaoRa.push({ ten: item.name, lyDo: "Thiếu đơn vị tính (unit) — bị loại" });
+        return false;
+      }
+      if (item.qty === null) return false; // đã ghi cảnh báo ở bước map() phía trên, không ghi lại lần nữa ở đây
       const qty = Number(item.qty);
-      if (!Number.isFinite(qty) || qty < 0) return false; // chặn khối lượng âm/NaN ngay từ backend
+      if (!Number.isFinite(qty) || qty < 0) {
+        if (canhBaoRa) canhBaoRa.push({ ten: item.name, lyDo: `Khối lượng tính ra không hợp lệ (${item.qty}) — bị loại` });
+        return false;
+      }
       if (item.group != null && !NHOM_HOP_LE.has(item.group)) item.group = undefined; // group lạ -> để trống, không chặn cả dòng
       return true;
     });
@@ -1308,6 +1329,15 @@ const TAKEOFF_PROMPT_GOC =
   '"rong_m": chiều rộng sàn, "day_m": chiều dày sàn (dùng 0.1-0.12 nếu không có số liệu, ghi rõ trong note là giả định)}. ' +
   'App tự tính khối lượng = dai_m × rong_m × day_m (m³). ' +
   '\n\n' +
+  'BẮT BUỘC: "calc_type" CHỈ ĐƯỢC là ĐÚNG 1 trong 7 giá trị đã liệt kê ở trên — TUYỆT ĐỐI KHÔNG được tự đặt tên khác ' +
+  '(VD không được viết "tinh_dien_tich_son", "dien_tich_tran", hay bất kỳ tên nào khác không có trong 7 giá trị đó) — ' +
+  'nếu tự đặt tên khác, app sẽ KHÔNG NHẬN DIỆN ĐƯỢC và XOÁ TOÀN BỘ dòng đó, mất trắng dữ liệu bạn vừa đọc được. ' +
+  'Với các hạng mục KHÔNG PHẢI tường/cột/dầm/móng/sàn (VD sơn nước, gạch lát/ốp, trần thạch cao, cửa, thiết bị vệ sinh, ' +
+  'điện nước...): nếu bản vẽ/bảng đã GHI SẴN số đo/diện tích/số lượng trực tiếp → dùng "doc_truc_tiep" (chép lại số đó); ' +
+  'nếu là đếm số lượng vật thể (cửa, đèn, thiết bị...) → dùng "dem_so_luong"; nếu CẦN ƯỚC LƯỢNG diện tích bằng mắt từ ' +
+  'kích thước phòng/tường (không có số ghi sẵn) và không phải bê tông/xây tường → VẪN dùng "doc_truc_tiep" với ' +
+  '"value_do_duoc" là diện tích ước lượng được, ghi rõ trong "note" đây là ước lượng bằng mắt, không phải số ghi sẵn. ' +
+  '\n\n' +
   'THÊM trường "object_ref" (TUỲ CHỌN, để trống nếu không chắc) — CHỈ điền khi 2 HẠNG MỤC KHÁC LOẠI CÔNG TÁC ' +
   'nhưng CHẮC CHẮN 100% mô tả ĐÚNG 1 vật thể vật lý duy nhất (VD "Xây tường ngoài Tầng 1" và "Sơn nước tường ngoài Tầng 1" ' +
   'là ĐÚNG cùng 1 bức tường đó; "Đào đất móng M1" và "Đổ bê tông móng M1" là ĐÚNG cùng 1 hố móng đó) — điền CÙNG 1 chuỗi ' +
@@ -1354,8 +1384,26 @@ const TAKEOFF_PROMPT_GOC =
 //   liệu đọc được vào đúng các đầu việc này thay vì tự đặt tên mới tự do, để kết
 //   quả bám sát cấu trúc dự toán chuẩn công ty đã lập sẵn (và nhờ vậy tự động có
 //   đơn giá thật từ định mức đã khớp, không rơi vào định mức mới giá 0đ).
-function taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) {
+function taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien, duToanMauThamChieu) {
   let p = TAKEOFF_PROMPT_GOC;
+  // Ví dụ mẫu ĐẦY ĐỦ (không chỉ tên đầu việc) — dán nguyên văn 1 dự toán thật
+  // đã làm trước (VD toàn bộ ghi chú Assumptions của công trình tương tự: số
+  // liệu, tỷ lệ/hệ số, lý do suy luận cho từng mục). Khác "danhSachChuan" ở
+  // dưới (chỉ có TÊN đầu việc) — đây LÀ TOÀN VĂN 1 ví dụ thật, đúng cách dùng
+  // đã kiểm chứng hiệu quả khi làm trực tiếp trong khung chat: cho AI 1 mẫu
+  // cụ thể để bám theo phương pháp luận/đơn giá, rồi tính LẠI khối lượng
+  // riêng theo đúng bản vẽ mới, không phải chỉ liệt kê tên trừu tượng.
+  const vd = (duToanMauThamChieu || "").trim();
+  if (vd) {
+    p += `\n\n=== DỰ TOÁN MẪU THAM CHIẾU (công trình TƯƠNG TỰ đã làm trước, dùng để tham khảo phương pháp luận + đơn giá) ===\n` +
+      vd +
+      `\n=== HẾT DỰ TOÁN MẪU ===\n\n` +
+      `CÁCH DÙNG mẫu trên: ĐÂY LÀ VÍ DỤ THẬT, không phải khuôn cứng nhắc. Dùng CÙNG phương pháp luận và đơn giá vật tư/nhân công ` +
+      `(vì thường cùng nhà thầu/thời điểm, giá tương đương) — NHƯNG khối lượng (m², m³, số lượng...) PHẢI TÍNH LẠI RIÊNG theo ĐÚNG kích thước/số liệu ` +
+      `đọc được từ bản vẽ ĐANG XỬ LÝ, KHÔNG được chép nguyên số của mẫu nếu bản vẽ mới có kích thước khác. ` +
+      `Nếu 1 hạng mục trong mẫu KHÔNG xuất hiện trên bản vẽ mới (VD mẫu có bếp nhưng bản vẽ mới không có ký hiệu bếp), BỎ hạng mục đó — không copy máy móc. ` +
+      `Ghi trong "note" RÕ RÀNG nếu có điểm khác biệt đáng kể so với mẫu (VD mật độ phòng khác → hệ số khác, quy mô khác → tỷ lệ khác) và LÝ DO — giống cách 1 QS thật giải trình khi lập dự toán mới dựa trên dự toán cũ.`;
+  }
   if (Array.isArray(danhSachChuan) && danhSachChuan.length) {
     p += `\n\nCÔNG TY ĐÃ CÓ SẴN DANH SÁCH ${danhSachChuan.length} ĐẦU VIỆC CHUẨN cho loại công trình này (từ mẫu dự toán đầy đủ đã lập trước — đây là mẫu THẬT, ĐẦY ĐỦ mà công ty dùng cho công trình cùng loại):\n` +
       danhSachChuan.map((t, i) => `${i + 1}. ${t}`).join("\n") +
@@ -1443,7 +1491,7 @@ function kiemTraAnhBase64(base64, mediaType) {
 
 app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { base64: rawB64, mediaType: rawMt, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien } = req.body || {};
+    const { base64: rawB64, mediaType: rawMt, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!rawB64) return res.status(400).json({ error: "Thiếu base64" });
     const check = kiemTraAnhBase64(rawB64, rawMt);
     if (!check.ok) return res.status(400).json({ error: check.message, code: check.code });
@@ -1456,7 +1504,7 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
     const [data, ocrBoSung] = await Promise.all([
       callUnifiedAI([
         { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
-        { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) },
+        { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien, duToanMauThamChieu) },
       ], undefined, provider),
       layOcrBoSungNeuBat(base64, mediaType),
     ]);
@@ -1521,7 +1569,7 @@ app.post("/api/ocr-vision/cache-clear", batBuocDangNhap, async (req, res) => {
 
 app.post("/api/analyze-images-batch", aiLimiter, gioiHanDongThoi, batBuocDangNhap, async (req, res) => {
   try {
-    const { images, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien } = req.body || {};
+    const { images, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!Array.isArray(images) || !images.length) return res.status(400).json({ error: "Thiếu danh sách ảnh" });
     if (images.length > 20) return res.status(400).json({ error: "Tối đa 20 ảnh mỗi lượt đọc gộp." });
     // SỬA LỖI 4: chèn nhãn số thứ tự + tên file NGAY TRƯỚC mỗi ảnh, để AI biết
@@ -1544,7 +1592,7 @@ app.post("/api/analyze-images-batch", aiLimiter, gioiHanDongThoi, batBuocDangNha
       `\n\nBẮT BUỘC: thêm trường "source_image_index" (số nguyên 1-${images.length}) cho MỌI hạng mục — chỉ rõ hạng mục đó đọc được ` +
       `TỪ ẢNH SỐ MẤY (dựa theo nhãn "--- Ảnh số N ---"). Nếu hạng mục tổng hợp/đối chiếu từ nhiều ảnh, ghi số ảnh CHÍNH chứa số liệu ` +
       `dùng để tính. Không được để trống trường này.)`;
-    contentBlocks.push({ type: "text", text: taoPrompt(ghiChuGop, danhSachChuan, tenCam, tenUuTien) });
+    contentBlocks.push({ type: "text", text: taoPrompt(ghiChuGop, danhSachChuan, tenCam, tenUuTien, duToanMauThamChieu) });
     // Cho phép đổi hãng AI NGAY TRONG 1 lần gọi (không cần đổi biến môi trường +
     // deploy lại) — để so sánh trực tiếp Claude vs Gemini trên CÙNG 1 bộ ảnh.
     const data = await callUnifiedAI(contentBlocks, undefined, provider);
@@ -1639,7 +1687,7 @@ async function xuLyJobNen(jobId) {
           contentBlocks.push({ type: "text", text: `--- Ảnh số ${k + 1} (tên file: "${img.name || "?"}") ---` });
           contentBlocks.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.base64 } });
         });
-        contentBlocks.push({ type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien) });
+        contentBlocks.push({ type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) });
         const data = await callUnifiedAI(contentBlocks, undefined, job.provider);
         const rawItems = parseRawJsonTuAI(data);
         const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, lo.anh.length, lo.anh);
@@ -1681,7 +1729,7 @@ app.post("/api/jobs/batch-analyze", batBuocDangNhap, async (req, res) => {
     if (soJobDangChayNen >= GIOI_HAN_JOB_DONG_THOI) {
       return res.status(429).json({ error: `Đang có ${soJobDangChayNen} job lớn chạy nền (tối đa ${GIOI_HAN_JOB_DONG_THOI} cùng lúc) — đợi job hiện tại xong rồi thử lại.` });
     }
-    const { images, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien } = req.body || {};
+    const { images, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!Array.isArray(images) || !images.length) return res.status(400).json({ error: "Thiếu danh sách ảnh" });
     if (images.length > 400) return res.status(400).json({ error: "Tối đa 400 trang mỗi job (quá lớn ngay cả khi chia lô)." });
     const cacLo = [];
@@ -1691,7 +1739,7 @@ app.post("/api/jobs/batch-analyze", batBuocDangNhap, async (req, res) => {
     const jobId = uidBackend("job");
     const job = {
       jobId, taoLuc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?",
-      tongSoAnh: images.length, tongSoLo: cacLo.length, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien,
+      tongSoAnh: images.length, tongSoLo: cacLo.length, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu,
       cacLo, trangThaiTong: "dang_chay",
     };
     ghiJob(job);
@@ -1744,7 +1792,12 @@ app.get("/api/jobs/:jobId/result", batBuocDangNhap, (req, res) => {
 // phải cảnh báo nhẹ). Dùng ngưỡng an toàn 90 trang (chừa margin). Dùng pdf-lib
 // (thuần JavaScript, KHÔNG cần binary hệ thống như Poppler — cài được bình
 // thường qua npm install, không cần đổi sang Docker).
-const NGUONG_TRANG_AN_TOAN = 90;
+const NGUONG_TRANG_AN_TOAN = 40; // 90 -> 40: giảm để tránh lỗi 520 (Cloudflare/Render
+// tự ngắt kết nối "im lặng" quá lâu khi 1 lần gọi PDF nhiều trang mất >90-180s)
+// — chẩn đoán thật từ triệu chứng người dùng (PDF 50-89 trang, dưới ngưỡng cũ
+// 90 nên gọi 1 lần duy nhất, đủ lâu để bị proxy cắt kết nối). CHỈ AN TOÀN sau
+// khi frontend đã có code chờ/đọc kết quả Job Queue (mỗi lần hỏi lại là 1
+// request ngắn, không giữ kết nối mở lâu, không bị proxy timeout).
 async function chiaPdfLonNeuCanThiet(base64) {
   const { PDFDocument } = require("pdf-lib");
   const bytes = Buffer.from(base64, "base64");
@@ -1783,7 +1836,7 @@ async function xuLyJobPdfLon(jobId) {
         const contentBlocks = [
           { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
           { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
-          { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien) },
+          { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
         ];
         const data = await callUnifiedAI(contentBlocks, "pdfs-2024-09-25", job.provider);
         const rawItems = parseRawJsonTuAI(data);
@@ -1811,7 +1864,7 @@ async function xuLyJobPdfLon(jobId) {
 
 app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
-    const { base64, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien } = req.body || {};
+    const { base64, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Thiếu base64" });
 
     const { tongSoTrang, cacPhan } = await chiaPdfLonNeuCanThiet(base64);
@@ -1821,7 +1874,7 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
       const data = await callUnifiedAI(
         [
           { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-          { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien) },
+          { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien, duToanMauThamChieu) },
         ],
         "pdfs-2024-09-25",
         provider
@@ -1842,7 +1895,7 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
     const job = {
       jobId, taoLuc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?",
       loai: "pdf_lon", tongSoTrang, tenFile: req.body?.name || "document.pdf",
-      ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien,
+      ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu,
       tongSoLo: cacPhan.length,
       cacLo: cacPhan.map((p, idx) => ({ soLo: idx + 1, pdfBase64: p.base64, tuTrang: p.tuTrang, denTrang: p.denTrang, trangThai: "cho", items: [], loi: null })),
       trangThaiTong: "dang_chay",
