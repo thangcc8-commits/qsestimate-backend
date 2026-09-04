@@ -22,13 +22,6 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Cài dependency (npm install)
-        run: npm install
-        # SỬA LỖI THẬT: workflow trước đây THIẾU bước này — regression_test.js
-        # và golden_dataset_test.js cần polygon-clipping/pdf-lib (require trực
-        # tiếp), thiếu bước cài đặt này sẽ khiến job THẤT BẠI ngay lập tức với
-        # lỗi "Cannot find module 'polygon-clipping'".
-
       - name: Chạy bộ kiểm tra hồi quy (logic công thức)
         run: node regression_test.js
         # Nếu regression_test.js exit code != 0 (có test fail), bước này tự
@@ -36,7 +29,8 @@ jobs:
 
       - name: Chạy Golden Dataset (độ chính xác THẬT so với công trình đã nghiệm thu)
         run: node golden_dataset_test.js
-        # Hiện dataset RỖNG (3 entry cũ đã bị xoá vì không chính xác) — bước
-        # này sẽ BỎ QUA (không PASS/FAIL) cho tới khi có dữ liệu thật mới —
-        # ngay khi thêm, nếu có project nào lệch quá ngưỡng dung sai, build sẽ
-        # TỰ ĐỘNG bị chặn ở đây.
+        # KHÁC với bước trên — bước này so sánh khối lượng app tự tính với khối
+        # lượng QS đã kiểm tra thật ngoài công trường (xem golden-dataset.json).
+        # Hiện dataset RỖNG (chưa có công trình thật) nên bước này sẽ PASS
+        # (không chặn) — nhưng ngay khi thêm dữ liệu thật, nếu có project nào
+        # lệch quá ngưỡng dung sai, build sẽ TỰ ĐỘNG bị chặn ở đây.

@@ -1,10 +1,10 @@
 // ============================================================================
 // zip-build.js — Tự Động Đóng Gói QsEstimateApp.zip
 // ----------------------------------------------------------------------------
-// SỬA LỖI (phát hiện qua chạy thử thật): trước đây thiếu hẳn
-// .github/workflows/regression.yml (CI sẽ KHÔNG BAO GIỜ tự chạy nếu deploy
-// bằng zip từ script này) và data/.gitkeep. Giờ đóng gói đủ 14 file, tự tạo
-// data/.gitkeep nếu thư mục data/ chưa tồn tại (server chưa từng chạy lần nào).
+// SỬA LỖI: trước đây chỉ đóng gói 5 file lõi (package.json, server.js,
+// index.html, app.bundle.js, .env.example) — THIẾU storage-postgres.js
+// (server.js require() file này khi có DATABASE_URL, thiếu sẽ crash khi
+// deploy có Postgres) và regression_test.js (cần cho CI). Giờ đóng gói đủ.
 // ============================================================================
 const fs = require("fs");
 const path = require("path");
@@ -19,28 +19,9 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// CI workflow — BẮT BUỘC để GitHub Actions tự chạy test mỗi lần push. Thiếu
-// file này ở đúng đường dẫn .github/workflows/ nghĩa là CI sẽ không bao giờ
-// kích hoạt, dù nội dung code đúng 100%.
-const workflowPath = path.join(".github", "workflows", "regression.yml");
-if (!fs.existsSync(path.join(__dirname, workflowPath))) {
-  console.error(`❌ Thiếu ${workflowPath} — CI sẽ không tự chạy nếu thiếu file này. Dừng đóng gói.`);
-  process.exit(1);
-}
-
-// data/.gitkeep — giữ thư mục data/ rỗng ban đầu trong Git (Git không lưu thư
-// mục rỗng nếu không có ít nhất 1 file bên trong). Tự tạo nếu chưa có (VD lần
-// đầu chạy script này, server chưa từng khởi động để tự tạo thư mục data/).
-const dataDir = path.join(__dirname, "data");
-const gitkeepPath = path.join("data", ".gitkeep");
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-if (!fs.existsSync(path.join(__dirname, gitkeepPath))) fs.writeFileSync(path.join(__dirname, gitkeepPath), "");
-
 // .gitignore là tuỳ chọn — không có cũng không chặn đóng gói (không phải file
 // bắt buộc để app CHẠY được, chỉ cần khi commit lên Git).
-const filesToZip = requiredFiles
-  .concat(fs.existsSync(path.join(__dirname, ".gitignore")) ? [".gitignore"] : [])
-  .concat([workflowPath, gitkeepPath]);
+const filesToZip = requiredFiles.concat(fs.existsSync(path.join(__dirname, ".gitignore")) ? [".gitignore"] : []);
 
 const zipName = "QsEstimateApp.zip";
 console.log("Đang tiến hành đóng gói tự động...");

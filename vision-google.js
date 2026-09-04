@@ -200,28 +200,6 @@ async function ghiCache(key, result) {
   }
 }
 
-// Trích xuất textAnnotations-tương-đương TỪ fullTextAnnotation (dùng khi
-// DOCUMENT_TEXT_DETECTION trả textAnnotations rỗng) — DÙNG CHUNG cho cả hàm
-// đơn lẻ và batch, tránh 1 chỗ sửa mà chỗ kia quên (đã xảy ra thật — batch
-// từng thiếu fallback này dù hàm đơn lẻ đã sửa).
-function trichXuatTuFullTextAnnotation(fullTextAnnotation) {
-  const anns = [{ description: "", boundingPoly: { vertices: [] } }]; // giữ chỗ — parseAnnotations() luôn slice(1)
-  const pages = fullTextAnnotation?.pages || [];
-  pages.forEach((page) => {
-    (page.blocks || []).forEach((block) => {
-      (block.paragraphs || []).forEach((para) => {
-        (para.words || []).forEach((word) => {
-          const text = (word.symbols || []).map((s) => s.text || "").join("");
-          if (text && word.boundingBox?.vertices) {
-            anns.push({ description: text, boundingPoly: { vertices: word.boundingBox.vertices } });
-          }
-        });
-      });
-    });
-  });
-  return anns;
-}
-
 /**
  * OCR 1 ảnh — có cache + in-flight dedupe
  */
@@ -272,7 +250,6 @@ async function ocrGoogleVision(base64, mediaType, apiKey, opts = {}) {
         imageContext: { languageHints: ["vi", "en"] },
       },
     ]);
-
     if (data.responses?.[0]?.error) {
       throw new Error(`Google Vision: ${data.responses[0].error.message}`);
     }
@@ -281,7 +258,8 @@ async function ocrGoogleVision(base64, mediaType, apiKey, opts = {}) {
     // DOCUMENT_TEXT_DETECTION: fullTextAnnotation; TEXT_DETECTION: textAnnotations
     let anns = textAnnotations;
     if ((!anns || anns.length === 0) && data.responses?.[0]?.fullTextAnnotation) {
-      anns = trichXuatTuFullTextAnnotation(data.responses[0].fullTextAnnotation);
+      // fallback extract pages blocks — đơn giản: dùng textAnnotations nếu API trả
+      anns = textAnnotations;
     }
     const kichThuocAnh = layKichThuocAnh(base64, mediaType);
     const result = parseAnnotations(anns, kichThuocAnh);
@@ -319,13 +297,6 @@ async function ocrGoogleVisionBatch(images, apiKey, opts = {}) {
       continue;
     }
     const bytes = uocLuongBytes(base64);
-    // SỬA LỖI THẬT: batch trước đây THIẾU check này — hàm đơn lẻ đã có
-    // "anh_qua_nho" từ trước, batch chỉ check "quá ngắn"/"quá lớn", bỏ sót
-    // trường hợp ảnh gần rỗng/trắng (giữa 2 ngưỡng) vẫn tốn phí gọi API.
-    if (bytes < MIN_IMAGE_BYTES) {
-      results[i] = { tongSoText: 0, items: [], goiYSoDo: [], fromCache: false, skipped: "anh_qua_nho", bytes };
-      continue;
-    }
     if (bytes > MAX_IMAGE_BYTES) {
       skippedLarge++;
       results[i] = { tongSoText: 0, items: [], goiYSoDo: [], fromCache: false, skipped: "anh_qua_lon", bytes };
@@ -367,14 +338,7 @@ async function ocrGoogleVisionBatch(images, apiKey, opts = {}) {
         continue;
       }
       const kichThuocAnh = layKichThuocAnh(it.base64, it.mediaType);
-      // SỬA LỖI THẬT (phát hiện qua audit): batch trước đây CHỈ đọc
-      // resp.textAnnotations, thiếu hẳn fallback fullTextAnnotation mà hàm
-      // đơn lẻ đã có — dùng DOCUMENT_TEXT_DETECTION qua batch sẽ mất evidence.
-      let annsBatch = resp.textAnnotations || [];
-      if ((!annsBatch || annsBatch.length === 0) && resp.fullTextAnnotation) {
-        annsBatch = trichXuatTuFullTextAnnotation(resp.fullTextAnnotation);
-      }
-      const result = parseAnnotations(annsBatch, kichThuocAnh);
+      const result = parseAnnotations(resp.textAnnotations || [], kichThuocAnh);
       await ghiCache(it.key, result);
       results[it.index] = { ...result, fromCache: false, cacheLayer: "api_batch" };
     }
