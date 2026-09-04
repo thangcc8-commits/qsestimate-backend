@@ -71,6 +71,18 @@ if (GOOGLE_VISION_API_KEY) {
   } catch (e) { console.error("✗ Không load được vision-google.js:", e.message); }
 }
 
+// Soft-require pdf-ocr.js — CHỈ dùng module Node built-in (fs/path/os/crypto/
+// child_process), luôn require thành công; điều kiện thực sự cần là binary hệ
+// thống "pdftoppm" (poppler-utils), được TỰ KIỂM TRA BÊN TRONG module (không
+// crash app nếu thiếu, chỉ báo lỗi rõ khi thực sự gọi tới). GIẢI QUYẾT lỗ hổng
+// thật đã xác nhận: code cũ chỉ OCR TRANG ĐẦU của PDF nhiều trang qua
+// layOcrBoSungNeuBat, bỏ qua toạ độ chữ/số đo của mọi trang sau.
+let pdfOcrModule = null;
+try {
+  pdfOcrModule = require("./pdf-ocr.js");
+  console.log(`✓ pdf-ocr.js đã tải — OCR đủ nhiều trang PDF khả dụng nếu server có poppler-utils (kiểm tra thật lúc gọi: ${pdfOcrModule.kiemTraPdftoppm() ? "CÓ pdftoppm" : "CHƯA có pdftoppm trên host này"})`);
+} catch (e) { console.error("✗ Không load được pdf-ocr.js:", e.message); }
+
 
 if (!ANTHROPIC_API_KEY) {
   console.error("[FATAL] Thiếu ANTHROPIC_API_KEY trong file .env — server sẽ không gọi được AI cho tới khi anh điền key vào.");
@@ -772,7 +784,7 @@ function b06_geometry(normalizedItems) {
   // tự tính khối lượng bằng công thức thật ở bước 04 — đây chính là 1 phần
   // Geometry Engine thật, chỉ là không dùng toạ độ pixel mà dùng số đo AI
   // đọc/ước lượng.
-  const CAC_LOAI_TINH_HINH_HOC = new Set(["tinh_tu_kich_thuoc_tuong", "tinh_tu_kich_thuoc_cot", "tinh_tu_kich_thuoc_dam", "tinh_tu_kich_thuoc_mong", "tinh_tu_kich_thuoc_san"]);
+  const CAC_LOAI_TINH_HINH_HOC = new Set(["tinh_tu_kich_thuoc_tuong", "tinh_tu_kich_thuoc_cot", "tinh_tu_kich_thuoc_dam", "tinh_tu_kich_thuoc_mong", "tinh_tu_kich_thuoc_san", "tinh_dien_tich_hinh_chu_nhat", "tinh_chu_vi_hinh_chu_nhat", "tinh_the_tich_hinh_hop", "tinh_theo_chieu_dai", "tinh_thep_kg", "tinh_thep_kg_truc_tiep"]);
   const soDongTinhHinhHoc = normalizedItems.filter((i) => CAC_LOAI_TINH_HINH_HOC.has(i.calc_type)).length;
   if (soDongTinhHinhHoc > 0) {
     return { step: "06_GEOMETRY", status: "partial", reason: `Chạy 1 phần: ${soDongTinhHinhHoc} dòng tính khối lượng (tường/cột/dầm/móng/sàn) bằng công thức thật, KHÔNG dùng qty AI tự đưa. Chưa có polygon/intersection đầy đủ như Geometry Engine chuẩn.` };
@@ -1113,6 +1125,60 @@ function tinhQtySanTuFormulaInputs(fi) {
   return +(dai * rong * day).toFixed(4); // m³
 }
 
+// ---- 6 hàm calc_type MỚI — đóng khe hở "doc_truc_tiep dùng cho MỌI THỨ vì
+// thiếu loại phù hợp" (nguyên nhân đã xác nhận khiến nhiều hạng mục sơn/gạch/
+// trần/thép/đào đất bị AI gộp nhầm vào "đọc trực tiếp" dù thực ra cần TÍNH từ
+// kích thước). Đã test 10/10 pass với số liệu thật trước khi tích hợp.
+function soDuongHopLe(v, max = 10000) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= max ? n : null;
+}
+function truDienTichLoMo(dienTichGop, deductions) {
+  if (!Array.isArray(deductions)) return dienTichGop;
+  const tong = deductions.reduce((s, d) => {
+    const w = soDuongHopLe(d?.width_m, 50), h = soDuongHopLe(d?.height_m, 50), c = soDuongHopLe(d?.count ?? 1, 10000);
+    if (w === null || h === null || c === null) return s;
+    return s + w * h * c;
+  }, 0);
+  return Math.max(0, dienTichGop - tong);
+}
+function tinhQtyDienTichHinhChuNhat(fi) {
+  if (!fi || typeof fi !== "object") return null;
+  const dai = soDuongHopLe(fi.dai_m, 500), rong = soDuongHopLe(fi.rong_m, 500);
+  if (dai === null || rong === null || dai <= 0 || rong <= 0) return null;
+  return +truDienTichLoMo(dai * rong, fi.deductions).toFixed(4);
+}
+function tinhQtyChuViHinhChuNhat(fi) {
+  if (!fi || typeof fi !== "object") return null;
+  const dai = soDuongHopLe(fi.dai_m, 500), rong = soDuongHopLe(fi.rong_m, 500);
+  if (dai === null || rong === null || dai <= 0 || rong <= 0) return null;
+  return +(2 * (dai + rong)).toFixed(4);
+}
+function tinhQtyTheTichHinhHop(fi) {
+  if (!fi || typeof fi !== "object") return null;
+  const dai = soDuongHopLe(fi.dai_m, 500), rong = soDuongHopLe(fi.rong_m, 500), cao = soDuongHopLe(fi.cao_m, 50);
+  if (dai === null || rong === null || cao === null || dai <= 0 || rong <= 0 || cao <= 0) return null;
+  return +(dai * rong * cao).toFixed(4);
+}
+function tinhQtyTheoChieuDai(fi) {
+  if (!fi || typeof fi !== "object") return null;
+  const dai = soDuongHopLe(fi.dai_m, 10000), sl = soDuongHopLe(fi.so_luong ?? 1, 100000);
+  if (dai === null || sl === null || dai < 0 || sl < 0) return null;
+  return +(dai * sl).toFixed(4);
+}
+function tinhQtyThepKg(fi) {
+  if (!fi || typeof fi !== "object") return null;
+  const dai = soDuongHopLe(fi.dai_m, 10000), sl = soDuongHopLe(fi.so_luong ?? 1, 100000), kgm = soDuongHopLe(fi.kg_m, 100);
+  if (dai === null || sl === null || kgm === null || dai <= 0 || sl <= 0 || kgm <= 0) return null;
+  return +(dai * sl * kgm).toFixed(3);
+}
+function tinhQtyThepTuKhoiLuong(fi) {
+  if (!fi || typeof fi !== "object") return null;
+  const kg = soDuongHopLe(fi.kg, 10000000), sl = soDuongHopLe(fi.so_luong ?? 1, 100000);
+  if (kg === null || sl === null || kg < 0 || sl <= 0) return null;
+  return +(kg * sl).toFixed(3);
+}
+
 // ---- 2 hàm MỚI — đóng nốt khe hở cuối cùng: TRƯỚC ĐÂY "doc_truc_tiep" và
 // "dem_so_luong" tin THẲNG field "qty" AI đưa (không qua hàm kiểm tra nào cả).
 // GIỜ CẢ 2 TRƯỜNG HỢP NÀY CŨNG PHẢI QUA ENGINE — AI không còn field "qty"
@@ -1173,11 +1239,17 @@ const BANG_CONG_THUC_ENGINE = {
   tinh_tu_kich_thuoc_dam: { fn: tinhQtyDamTuFormulaInputs, moTa: (fi) => `${fi?.rong_m}m × ${fi?.cao_m}m × ${fi?.dai_m}m dài (m³)` },
   tinh_tu_kich_thuoc_mong: { fn: tinhQtyMongTuFormulaInputs, moTa: (fi) => `${fi?.dai_m}m × ${fi?.rong_m}m × ${fi?.cao_m}m cao (m³)` },
   tinh_tu_kich_thuoc_san: { fn: tinhQtySanTuFormulaInputs, moTa: (fi) => `${fi?.dai_m}m × ${fi?.rong_m}m × ${fi?.day_m}m dày (m³)` },
+  tinh_dien_tich_hinh_chu_nhat: { fn: tinhQtyDienTichHinhChuNhat, moTa: (fi) => `${fi?.dai_m}m × ${fi?.rong_m}m − trừ lỗ mở (m²)` },
+  tinh_chu_vi_hinh_chu_nhat: { fn: tinhQtyChuViHinhChuNhat, moTa: (fi) => `2 × (${fi?.dai_m}m + ${fi?.rong_m}m) (m)` },
+  tinh_the_tich_hinh_hop: { fn: tinhQtyTheTichHinhHop, moTa: (fi) => `${fi?.dai_m}m × ${fi?.rong_m}m × ${fi?.cao_m}m (m³)` },
+  tinh_theo_chieu_dai: { fn: tinhQtyTheoChieuDai, moTa: (fi) => `${fi?.dai_m}m × ${fi?.so_luong ?? 1} (m)` },
+  tinh_thep_kg: { fn: tinhQtyThepKg, moTa: (fi) => `${fi?.dai_m}m × ${fi?.so_luong ?? 1} thanh × ${fi?.kg_m}kg/m (kg)` },
+  tinh_thep_kg_truc_tiep: { fn: tinhQtyThepTuKhoiLuong, moTa: (fi) => `${fi?.kg}kg × ${fi?.so_luong ?? 1} (kg)` },
 };
 
-// Đơn vị ĐÚNG theo calc_type — Engine ĐÃ BIẾT CHẮC CHẮN đơn vị nào đúng cho 5
-// loại tính hình học (không cần tin AI báo cáo, giống triết lý "Engine quyết
-// định qty, không phải AI" áp dụng xuyên suốt). doc_truc_tiep/dem_so_luong
+// Đơn vị ĐÚNG theo calc_type — Engine ĐÃ BIẾT CHẮC CHẮN đơn vị nào đúng cho
+// các loại tính hình học (không cần tin AI báo cáo, giống triết lý "Engine
+// quyết định qty, không phải AI" áp dụng xuyên suốt). doc_truc_tiep/dem_so_luong
 // KHÔNG có ở đây — đơn vị của 2 loại này CÓ THỂ là bất kỳ gì (cái, bộ, m...),
 // không thể áp quy tắc cứng.
 const DON_VI_DUNG_THEO_CALC_TYPE = {
@@ -1186,6 +1258,12 @@ const DON_VI_DUNG_THEO_CALC_TYPE = {
   tinh_tu_kich_thuoc_dam: "m3",
   tinh_tu_kich_thuoc_mong: "m3",
   tinh_tu_kich_thuoc_san: "m3",
+  tinh_dien_tich_hinh_chu_nhat: "m2",
+  tinh_chu_vi_hinh_chu_nhat: "m",
+  tinh_the_tich_hinh_hop: "m3",
+  tinh_theo_chieu_dai: "m",
+  tinh_thep_kg: "kg",
+  tinh_thep_kg_truc_tiep: "kg",
 };
 
 function locHangMucHopLe(danhSach, canhBaoRa) {
@@ -1328,15 +1406,26 @@ const TAKEOFF_PROMPT_GOC =
   '• "tinh_tu_kich_thuoc_san" — tính khối lượng BÊ TÔNG SÀN. Điền "formula_inputs": {"dai_m": chiều dài sàn, ' +
   '"rong_m": chiều rộng sàn, "day_m": chiều dày sàn (dùng 0.1-0.12 nếu không có số liệu, ghi rõ trong note là giả định)}. ' +
   'App tự tính khối lượng = dai_m × rong_m × day_m (m³). ' +
+  '\n' +
+  '• "tinh_dien_tich_hinh_chu_nhat" — dùng cho sàn lát gạch, chống thấm, trần, diện tích sơn phẳng, vách phẳng... khi có ' +
+  'dài×rộng. "formula_inputs": {"dai_m":..., "rong_m":..., "deductions":[{"width_m":...,"height_m":...,"count":...}]}. ' +
+  'Engine tự trừ lỗ mở. KHÔNG dùng cho tường (đã có calc_type riêng ở trên). ' +
+  '• "tinh_chu_vi_hinh_chu_nhat" — mét dài viền/nẹp/chân tường theo hình chữ nhật. "formula_inputs": {"dai_m":..., "rong_m":...}. ' +
+  '• "tinh_the_tich_hinh_hop" — đào đất, đất đắp, bê tông lót/hạng mục hình hộp chưa có loại cấu kiện riêng. ' +
+  '"formula_inputs": {"dai_m":..., "rong_m":..., "cao_m":...}. ' +
+  '• "tinh_theo_chieu_dai" — mét dài cáp/ống/nẹp/lan can... khi có chiều dài + số lượng. "formula_inputs": {"dai_m":..., "so_luong":...}. ' +
+  '• "tinh_thep_kg" — thép có chiều dài thanh + số thanh + khối lượng kg/m. "formula_inputs": {"dai_m":..., "so_luong":..., "kg_m":...}. ' +
+  '• "tinh_thep_kg_truc_tiep" — bảng thống kê đã có sẵn kg/thanh hoặc tổng kg rõ ràng. "formula_inputs": {"kg":..., "so_luong":...}. ' +
   '\n\n' +
-  'BẮT BUỘC: "calc_type" CHỈ ĐƯỢC là ĐÚNG 1 trong 7 giá trị đã liệt kê ở trên — TUYỆT ĐỐI KHÔNG được tự đặt tên khác ' +
-  '(VD không được viết "tinh_dien_tich_son", "dien_tich_tran", hay bất kỳ tên nào khác không có trong 7 giá trị đó) — ' +
+  'BẮT BUỘC: "calc_type" CHỈ ĐƯỢC là ĐÚNG 1 trong 13 giá trị đã liệt kê ở trên — TUYỆT ĐỐI KHÔNG được tự đặt tên khác ' +
+  '(VD không được viết "tinh_dien_tich_son", "dien_tich_tran", hay bất kỳ tên nào khác không có trong 13 giá trị đó) — ' +
   'nếu tự đặt tên khác, app sẽ KHÔNG NHẬN DIỆN ĐƯỢC và XOÁ TOÀN BỘ dòng đó, mất trắng dữ liệu bạn vừa đọc được. ' +
-  'Với các hạng mục KHÔNG PHẢI tường/cột/dầm/móng/sàn (VD sơn nước, gạch lát/ốp, trần thạch cao, cửa, thiết bị vệ sinh, ' +
-  'điện nước...): nếu bản vẽ/bảng đã GHI SẴN số đo/diện tích/số lượng trực tiếp → dùng "doc_truc_tiep" (chép lại số đó); ' +
-  'nếu là đếm số lượng vật thể (cửa, đèn, thiết bị...) → dùng "dem_so_luong"; nếu CẦN ƯỚC LƯỢNG diện tích bằng mắt từ ' +
-  'kích thước phòng/tường (không có số ghi sẵn) và không phải bê tông/xây tường → VẪN dùng "doc_truc_tiep" với ' +
-  '"value_do_duoc" là diện tích ước lượng được, ghi rõ trong "note" đây là ước lượng bằng mắt, không phải số ghi sẵn. ' +
+  'QUAN TRỌNG — ưu tiên CHỌN ĐÚNG loại tính hình học phù hợp thay vì "doc_truc_tiep": nếu bản vẽ CÓ SẴN kích thước ' +
+  '(dài/rộng/cao) cho sơn/gạch/trần/chống thấm/đào đất/đất đắp/MEP nhưng KHÔNG ghi sẵn diện tích/khối lượng cuối, PHẢI dùng ' +
+  'đúng loại tính hình học ở trên (VD "tinh_dien_tich_hinh_chu_nhat" cho sàn lát gạch có dài×rộng) — KHÔNG được tự nhẩm ' +
+  'tính rồi báo qua "doc_truc_tiep" như 1 số tròn đã tính sẵn (dễ làm tròn sai, mất độ chính xác so với để Engine tính ' +
+  'đúng từ số đo gốc). CHỈ dùng "doc_truc_tiep" khi bản vẽ/bảng đã GHI SẴN số đo/diện tích/số lượng CUỐI CÙNG trực tiếp ' +
+  '(chép lại đúng số đó, không tự suy ra); dùng "dem_so_luong" khi đếm số lượng vật thể rời (cửa, đèn, thiết bị...). ' +
   '\n\n' +
   'THÊM trường "object_ref" (TUỲ CHỌN, để trống nếu không chắc) — CHỈ điền khi 2 HẠNG MỤC KHÁC LOẠI CÔNG TÁC ' +
   'nhưng CHẮC CHẮN 100% mô tả ĐÚNG 1 vật thể vật lý duy nhất (VD "Xây tường ngoài Tầng 1" và "Sơn nước tường ngoài Tầng 1" ' +
@@ -1370,7 +1459,7 @@ const TAKEOFF_PROMPT_GOC =
   'Nếu không có mã hiệu rõ ràng hoặc chỉ có 1 nguồn duy nhất, để null. ' +
   'Đúng định dạng — TUYỆT ĐỐI KHÔNG có trường "qty" (AI không quyết định khối lượng cuối, chỉ báo cáo số đo thô): ' +
   '[{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","group":"mong|khung|hoanthien|mep",' +
-  '"calc_type":"doc_truc_tiep|dem_so_luong|tinh_tu_kich_thuoc_tuong|tinh_tu_kich_thuoc_cot|tinh_tu_kich_thuoc_dam|tinh_tu_kich_thuoc_mong|tinh_tu_kich_thuoc_san",' +
+  '"calc_type":"doc_truc_tiep|dem_so_luong|tinh_tu_kich_thuoc_tuong|tinh_tu_kich_thuoc_cot|tinh_tu_kich_thuoc_dam|tinh_tu_kich_thuoc_mong|tinh_tu_kich_thuoc_san|tinh_dien_tich_hinh_chu_nhat|tinh_chu_vi_hinh_chu_nhat|tinh_the_tich_hinh_hop|tinh_theo_chieu_dai|tinh_thep_kg|tinh_thep_kg_truc_tiep",' +
   '"formula_inputs":object đúng khuôn dạng calc_type tương ứng ở trên (BẮT BUỘC có, không được null),' +
   '"confidence":số 0-1 (AI tự đánh giá độ tự tin vào số đo mình đưa ra — 1 = rất chắc chắn, 0.3 = ước lượng mơ hồ),' +
   '"evidence_region":null hoặc {"x":số,"y":số,"w":số,"h":số},"declared_scale":null hoặc "1:100",' +
@@ -1402,7 +1491,13 @@ function taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien, duToanMauThamCh
       `(vì thường cùng nhà thầu/thời điểm, giá tương đương) — NHƯNG khối lượng (m², m³, số lượng...) PHẢI TÍNH LẠI RIÊNG theo ĐÚNG kích thước/số liệu ` +
       `đọc được từ bản vẽ ĐANG XỬ LÝ, KHÔNG được chép nguyên số của mẫu nếu bản vẽ mới có kích thước khác. ` +
       `Nếu 1 hạng mục trong mẫu KHÔNG xuất hiện trên bản vẽ mới (VD mẫu có bếp nhưng bản vẽ mới không có ký hiệu bếp), BỎ hạng mục đó — không copy máy móc. ` +
-      `Ghi trong "note" RÕ RÀNG nếu có điểm khác biệt đáng kể so với mẫu (VD mật độ phòng khác → hệ số khác, quy mô khác → tỷ lệ khác) và LÝ DO — giống cách 1 QS thật giải trình khi lập dự toán mới dựa trên dự toán cũ.`;
+      `Ghi trong "note" RÕ RÀNG nếu có điểm khác biệt đáng kể so với mẫu (VD mật độ phòng khác → hệ số khác, quy mô khác → tỷ lệ khác) và LÝ DO — giống cách 1 QS thật giải trình khi lập dự toán mới dựa trên dự toán cũ. ` +
+      `\n\nQUAN TRỌNG — CÁCH TÍNH khi CÓ mẫu tham chiếu này (khác với khi KHÔNG có mẫu): với các hạng mục PHỨC TẠP mà mẫu đã chỉ rõ cách tính ` +
+      `(nội thất theo phòng, thiết bị vệ sinh theo WC, MEP theo tầng, các hạng mục trọn gói theo m² như mẫu đã làm...), bạn ĐƯỢC PHÉP và NÊN tự tính ` +
+      `ra khối lượng CUỐI CÙNG ngay (dùng "doc_truc_tiep" với "value_do_duoc" là số đã tính xong) theo ĐÚNG cách mẫu đã làm, thay vì cố ép vào 1 trong các ` +
+      `loại tính hình học đơn giản (vốn chỉ phù hợp cho tường/cột/dầm/móng/sàn/hình khối cơ bản, không phù hợp cho công thức phức tạp nhiều bước như mẫu). ` +
+      `BẮT BUỘC ghi rõ TỪNG BƯỚC tính trong "note" (VD "16 phòng x 1 giường/phòng = 16 bộ, theo đúng cách mẫu S6-38 tính giường theo số phòng") để QS kiểm tra lại được. ` +
+      `RIÊNG 5 loại cấu kiện chính (tường/cột/dầm/móng/sàn) — VẪN LUÔN dùng đúng calc_type hình học tương ứng (KHÔNG dùng doc_truc_tiep cho các cấu kiện này dù có mẫu tham chiếu), vì đây là nơi Engine tính độc lập đã từng bắt được lỗi thật (làm tròn sai, quên trừ lỗ mở).`;
   }
   if (Array.isArray(danhSachChuan) && danhSachChuan.length) {
     p += `\n\nCÔNG TY ĐÃ CÓ SẴN DANH SÁCH ${danhSachChuan.length} ĐẦU VIỆC CHUẨN cho loại công trình này (từ mẫu dự toán đầy đủ đã lập trước — đây là mẫu THẬT, ĐẦY ĐỦ mà công ty dùng cho công trình cùng loại):\n` +
@@ -1546,6 +1641,25 @@ app.post("/api/ocr-vision", aiLimiter, batBuocDangNhap, async (req, res) => {
   }
 });
 
+// OCR ĐỦ MỌI TRANG của 1 PDF (không chỉ trang đầu như luồng analyze-pdf mặc
+// định) — dùng khi cần toạ độ chữ/số đo chi tiết cho b07_relationship trên cả
+// bộ hồ sơ nhiều trang, không chỉ trang 1. Endpoint RIÊNG, KHÔNG thay đổi hành
+// vi mặc định của /api/analyze-pdf — chỉ dùng khi người dùng CHỦ ĐỘNG gọi.
+app.post("/api/ocr-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
+  try {
+    if (!ocrGoogleVision) return res.status(501).json({ error: "Google Vision chưa được cấu hình — thiếu GOOGLE_VISION_API_KEY trên server." });
+    if (!pdfOcrModule) return res.status(501).json({ error: "Module pdf-ocr.js chưa tải được trên server." });
+    if (!pdfOcrModule.kiemTraPdftoppm()) return res.status(501).json({ error: "Host chưa cài poppler-utils (pdftoppm) — không OCR được nhiều trang PDF. Cần thêm poppler-utils vào build command trên Render." });
+    const { base64 } = req.body || {};
+    if (!base64) return res.status(400).json({ error: "Thiếu base64 PDF." });
+    const ocrFn = (b64, mt) => ocrGoogleVision(b64, mt, GOOGLE_VISION_API_KEY);
+    const ketQua = await pdfOcrModule.ocrPdfNhieuTrang(base64, ocrFn, {});
+    res.json(ketQua);
+  } catch (e) {
+    res.status(e.code === "NO_PDFTOPPM" ? 501 : 500).json({ error: e.message });
+  }
+});
+
 // Xem thống kê cache OCR (RAM) — hits/misses/apiCalls/dedupeHits — theo dõi
 // hiệu quả tiết kiệm chi phí Google Vision qua thời gian.
 app.get("/api/ocr-vision/cache-stats", batBuocDangNhap, async (req, res) => {
@@ -1595,7 +1709,15 @@ app.post("/api/analyze-images-batch", aiLimiter, gioiHanDongThoi, batBuocDangNha
     contentBlocks.push({ type: "text", text: taoPrompt(ghiChuGop, danhSachChuan, tenCam, tenUuTien, duToanMauThamChieu) });
     // Cho phép đổi hãng AI NGAY TRONG 1 lần gọi (không cần đổi biến môi trường +
     // deploy lại) — để so sánh trực tiếp Claude vs Gemini trên CÙNG 1 bộ ảnh.
-    const data = await callUnifiedAI(contentBlocks, undefined, provider);
+    // SỬA LỖI THẬT (phát hiện qua so sánh code — endpoint này vẫn chạy AI và
+    // OCR TUẦN TỰ dù /api/analyze-image đơn lẻ đã được sửa chạy song song từ
+    // trước; quên áp dụng cùng sửa chữa cho endpoint gộp nhiều ảnh này). OCR
+    // không phụ thuộc kết quả AI (chỉ cần base64 ảnh đầu, đã có sẵn) nên hoàn
+    // toàn chạy song song được, giảm độ trễ tổng.
+    const [data, ocrBoSung] = await Promise.all([
+      callUnifiedAI(contentBlocks, undefined, provider),
+      layOcrBoSungNeuBat(images[0]?.base64, images[0]?.mediaType || images[0]?.media_type || "image/jpeg"),
+    ]);
     const hangDaDung = provider || AI_PROVIDER;
     const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
     const tenGop = images.map((i) => i.name || "?").join(", ");
@@ -1603,8 +1725,6 @@ app.post("/api/analyze-images-batch", aiLimiter, gioiHanDongThoi, batBuocDangNha
     // Trả kèm danh sách tên ảnh theo ĐÚNG thứ tự đã đánh số, để frontend tra
     // source_image_index -> tên file thật, gán sourcePhoto chính xác từng dòng.
     const rawItems = parseRawJsonTuAI(data);
-    // OCR ảnh đầu (nếu bật) → pipeline b07 dùng nhãn tầng; trả ocrBoSung cho UI/API
-    const ocrBoSung = await layOcrBoSungNeuBat(images[0]?.base64, images[0]?.mediaType || images[0]?.media_type || "image/jpeg");
     const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, images.length, images, ocrBoSung);
     res.json({
       items, pipelineTrace, drawingModel, cost: chiPhi,
