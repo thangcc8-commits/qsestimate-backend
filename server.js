@@ -1295,16 +1295,35 @@ function locHangMucHopLe(danhSach, canhBaoRa) {
           item.note += ` [Đơn vị đã tự sửa từ "${unitCu}" thành "${donViDung}" — calc_type này luôn cho đơn vị cố định, không tin đơn vị AI tự báo cáo]`;
         }
       } else {
-        // calc_type thiếu/không nhận diện được -> KHÔNG có cách nào tính ra
-        // qty đáng tin -> loại bỏ, không đoán bừa.
-        item.qty = null;
+        // calc_type thiếu/không nhận diện được -> Engine KHÔNG có cách nào tự
+        // tính lại qty đáng tin. TRƯỚC ĐÂY: xoá thẳng dòng này (loại bỏ hoàn
+        // toàn), khiến app luôn đọc ra ÍT hạng mục hơn hẳn so với đọc trực
+        // tiếp trong khung chat AI (nơi tin thẳng số AI tự báo). Theo quyết
+        // định của Thắng (kiến trúc sư quyết định): GIỮ LẠI số AI tự báo cáo
+        // (raw.qty) cho các hạng mục KHÔNG thuộc 13 loại hình học/công thức
+        // Engine hiểu — đánh dấu RÕ RÀNG "chưa qua Engine kiểm chứng" để QS
+        // biết phải tự kiểm tra lại, thay vì mất trắng dữ liệu AI đã đọc được.
+        // CHỈ áp dụng cho nhánh này (calc_type lạ/thiếu) — 5 loại cấu kiện
+        // chính (tường/cột/dầm/móng/sàn) và trường hợp formula_inputs
+        // thiếu/sai ở nhánh congThuc phía trên VẪN giữ nguyên luật chặt cũ,
+        // không đổi.
+        const qtyAiTuBao = Number(raw.qty);
+        const coSoAiTuBao = Number.isFinite(qtyAiTuBao) && qtyAiTuBao >= 0;
+        if (coSoAiTuBao) {
+          item.qty = qtyAiTuBao;
+          item.qty_source = "ai_raw_chua_qua_engine";
+          item.note = (item.note || "") + ` [⚠ CHƯA QUA ENGINE KIỂM CHỨNG — calc_type "${item.calc_type || "(thiếu)"}" không thuộc 13 loại Engine tính được, dùng tạm số AI tự báo cáo. QS BẮT BUỘC tự kiểm tra lại khối lượng này trước khi dùng.]`;
+        } else {
+          item.qty = null;
+        }
         if (canhBaoRa) {
           // SỬA LỖI THẬT (phát hiện qua điều tra kiến trúc, đúng nguyên nhân
           // "app đọc ra ít hạng mục hơn hẳn chat AI trực tiếp"): AI CÓ THỂ đã
           // đọc đúng, đầy đủ hạng mục này — nhưng nếu dùng calc_type không
-          // khớp đúng 1 trong 13 loại app hiểu, dòng bị XOÁ HOÀN TOÀN, ÂM THẦM,
-          // không cảnh báo gì — người dùng tưởng nhầm là "AI không đọc được".
-          canhBaoRa.push({ ten: item.name || "(không tên)", lyDo: item.calc_type ? `calc_type "${item.calc_type}" không phải 1 trong 13 loại app hiểu được (bị loại)` : `AI không điền calc_type cho dòng này (bị loại)` });
+          // khớp đúng 1 trong 13 loại app hiểu, dòng trước đây bị XOÁ HOÀN
+          // TOÀN, ÂM THẦM — người dùng tưởng nhầm là "AI không đọc được".
+          const lyDoGoc = item.calc_type ? `calc_type "${item.calc_type}" không phải 1 trong 13 loại app hiểu được` : `AI không điền calc_type cho dòng này`;
+          canhBaoRa.push({ ten: item.name || "(không tên)", lyDo: coSoAiTuBao ? `${lyDoGoc} — ĐÃ GIỮ LẠI dùng số AI tự báo (${qtyAiTuBao}), CẦN QS xác nhận lại` : `${lyDoGoc} và AI cũng không có số nào để dùng tạm (bị loại)` });
         }
       }
       if (item.evidence_region !== undefined) item.evidence_region = chuanHoaEvidenceRegion(item.evidence_region);
@@ -1915,6 +1934,14 @@ app.get("/api/jobs/:jobId/result", batBuocDangNhap, async (req, res) => {
     jobId: job.jobId, trangThaiTong: job.trangThaiTong, tongSoLo: job.tongSoLo,
     items, canhBaoTrungLapGiuaCacLo: canhBaoTrungLap, tongChiPhiUsd: +tongChiPhi.toFixed(5),
     loCoLoi: job.cacLo.filter((l) => l.trangThai === "loi").map((l) => ({ soLo: l.soLo, loi: l.loi })),
+    // SỬA LỖI THẬT: trước đây endpoint này KHÔNG trả pipelineTrace/drawingModel
+    // dù mỗi lô đã tính sẵn (lo.pipelineTrace/lo.drawingModel) — frontend đọc
+    // data.pipelineTrace sau khi lấy kết quả job luôn ra null, mất hẳn phần
+    // chẩn đoán "9 bước" (04_NORMALIZE — lý do từng dòng bị loại) cho MỌI PDF
+    // đi qua job nền. Lấy từ lô đầu tiên — đại diện đúng cho trường hợp phổ
+    // biến nhất (PDF nhỏ giờ cũng luôn 1 lô, xem sửa /api/analyze-pdf bên dưới).
+    pipelineTrace: job.cacLo[0]?.pipelineTrace || null,
+    drawingModel: job.cacLo[0]?.drawingModel || null,
   });
 });
 
@@ -1931,12 +1958,9 @@ app.get("/api/jobs/:jobId/result", batBuocDangNhap, async (req, res) => {
 // phải cảnh báo nhẹ). Dùng ngưỡng an toàn 90 trang (chừa margin). Dùng pdf-lib
 // (thuần JavaScript, KHÔNG cần binary hệ thống như Poppler — cài được bình
 // thường qua npm install, không cần đổi sang Docker).
-const NGUONG_TRANG_AN_TOAN = 12; // 90 -> 40 -> 12: giảm tiếp vì PDF ~12-15 trang
-// (dưới ngưỡng 40 cũ) VẪN bị lỗi "Load failed" (đúng dấu hiệu Render/Cloudflare
-// tự ngắt kết nối im lặng khi 1 lần gọi PDF nhiều trang mất quá lâu) — hạ ngưỡng
-// để PDF cỡ vừa cũng tự động qua Job Queue (đã bền vững nhờ Postgres, xem docJob/
-// ghiJob), thay vì mạo hiểm xử lý trực tiếp trong 1 request dễ bị cắt giữa chừng
-// — chẩn đoán thật từ triệu chứng người dùng (PDF ~12-15 trang, dưới ngưỡng cũ
+const NGUONG_TRANG_AN_TOAN = 40; // 90 -> 40: giảm để tránh lỗi 520 (Cloudflare/Render
+// tự ngắt kết nối "im lặng" quá lâu khi 1 lần gọi PDF nhiều trang mất >90-180s)
+// — chẩn đoán thật từ triệu chứng người dùng (PDF 50-89 trang, dưới ngưỡng cũ
 // 90 nên gọi 1 lần duy nhất, đủ lâu để bị proxy cắt kết nối). CHỈ AN TOÀN sau
 // khi frontend đã có code chờ/đọc kết quả Job Queue (mỗi lần hỏi lại là 1
 // request ngắn, không giữ kết nối mở lâu, không bị proxy timeout).
@@ -2011,25 +2035,19 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
 
     const { tongSoTrang, cacPhan } = await chiaPdfLonNeuCanThiet(base64);
 
-    // PDF NHỎ (≤90 trang) — GIỮ NGUYÊN HÀNH VI CŨ Y HỆT, gọi 1 lần, trả kết quả ngay
-    if (cacPhan.length === 1) {
-      const data = await callUnifiedAI(
-        [
-          { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
-          { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien, duToanMauThamChieu) },
-        ],
-        "pdfs-2024-09-25",
-        provider
-      );
-      const hangDaDung = provider || AI_PROVIDER;
-      const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
-      ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: `PDF (${hangDaDung})`, ten: req.body?.name || "", ...chiPhi });
-      const rawItems = parseRawJsonTuAI(data);
-      const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ base64: "", name: req.body?.name || "document.pdf" }]);
-      return res.json({ items, pipelineTrace, drawingModel, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung, tongSoTrang });
-    }
-
-    // PDF LỚN (>90 trang) — TỰ ĐỘNG chuyển sang xử lý dạng Job nền, giống ảnh
+    // SỬA LỖI THẬT (chẩn đoán từ triệu chứng người dùng: PDF ít trang nhưng
+    // bản vẽ kiến trúc chi tiết, xử lý AI lâu — "treo ở 90%, bấm lại vẫn treo"
+    // trên mạng di động): trước đây PDF ≤40 trang gọi callUnifiedAI TRỰC TIẾP,
+    // giữ 1 kết nối HTTP mở tới khi xong — ngưỡng 40 trang chỉ chặn được rủi ro
+    // do NHIỀU TRANG, không chặn được rủi ro do NỘI DUNG NẶNG/AI xử lý lâu dù
+    // ít trang — vẫn đủ khiến Cloudflare/Render hoặc mạng di động chập chờn cắt
+    // kết nối âm thầm giữa chừng, app không có cách nào biết để báo lỗi, treo
+    // vô thời hạn. Giờ TẤT CẢ PDF đều qua hàng đợi nền (kể cả 1 trang) — mỗi
+    // lượt hỏi lại chỉ là 1 request ngắn (an toàn tuyệt đối trước timeout kết
+    // nối, không phụ thuộc đoán số trang/thời gian xử lý nữa). Cái giá phải trả
+    // là PDF nhỏ giờ chậm hơn ~vài giây (chu kỳ polling) — chấp nhận được so với
+    // treo vô thời hạn không rõ nguyên nhân. Lợi ích thêm: job nền đã có sẵn
+    // retry tự động 3 lần/lô (xuLyJobPdfLon) — đường gọi trực tiếp cũ KHÔNG có.
     if (soJobDangChayNen >= GIOI_HAN_JOB_DONG_THOI) {
       return res.status(429).json({ error: `Đang có ${soJobDangChayNen} job lớn chạy nền — chờ job hiện tại xong rồi thử lại.` });
     }
@@ -2045,7 +2063,12 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
     await ghiJob(job);
     soJobDangChayNen++;
     xuLyJobPdfLon(jobId).catch((e) => console.error("[Job PDF] Lỗi:", jobId, e.message)).finally(() => { soJobDangChayNen = Math.max(0, soJobDangChayNen - 1); });
-    res.json({ jobId, tongSoTrang, tongSoLo: cacPhan.length, trangThai: "dang_chay", ghiChu: `PDF có ${tongSoTrang} trang, vượt ngưỡng an toàn ${NGUONG_TRANG_AN_TOAN} trang của Claude API — tự động chia thành ${cacPhan.length} phần, xử lý nền.` });
+    res.json({
+      jobId, tongSoTrang, tongSoLo: cacPhan.length, trangThai: "dang_chay",
+      ghiChu: cacPhan.length > 1
+        ? `PDF có ${tongSoTrang} trang, vượt ngưỡng an toàn ${NGUONG_TRANG_AN_TOAN} trang của Claude API — tự động chia thành ${cacPhan.length} phần, xử lý nền.`
+        : `Đang xử lý nền (${tongSoTrang} trang) — tự động chờ/hỏi lại định kỳ, không cần thao tác gì thêm.`,
+    });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
