@@ -100,7 +100,11 @@ if (ALLOWED_ORIGIN === "*") {
 // và API key được giữ kín phía server, không lộ ra ngoài dù nguồn gọi là gì.
 app.use(cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN }));
 app.options("*", cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN })); // trả lời yêu cầu "thăm dò" (preflight) của trình duyệt
-app.use(express.json({ limit: "40mb" })); // dư địa an toàn — trần thật nằm ở phía Anthropic (32MB), không phải ở đây
+app.use(express.json({ limit: "110mb" })); // SỬA: nâng từ 40mb — giờ server tự chia PDF theo dung lượng
+// (xem chiaPdfLonNeuCanThiet), nên trần thật cần đủ rộng cho cả file TRƯỚC KHI
+// chia (base64 hoá phình ~33% so với file gốc) — 110mb đủ cho file gốc tới
+// ~80MB, khớp với HARD_MAX phía app. Vẫn có giới hạn để tránh 1 request khổng
+// lồ bất thường làm tràn bộ nhớ server (RAM Render có hạn).
 
 // ---- Bảo mật HTTP cơ bản (không cần package helmet) ----
 app.disable("x-powered-by");
@@ -1964,24 +1968,74 @@ const NGUONG_TRANG_AN_TOAN = 40; // 90 -> 40: giảm để tránh lỗi 520 (Clo
 // 90 nên gọi 1 lần duy nhất, đủ lâu để bị proxy cắt kết nối). CHỈ AN TOÀN sau
 // khi frontend đã có code chờ/đọc kết quả Job Queue (mỗi lần hỏi lại là 1
 // request ngắn, không giữ kết nối mở lâu, không bị proxy timeout).
+// SỬA LỖI THẬT (chẩn đoán từ triệu chứng người dùng: file "A7-14.pdf" 45.4MB/
+// 12 trang bị app CHẶN THẲNG ở phía trình duyệt trước khi kịp gửi lên server —
+// vì hàm này TRƯỚC ĐÂY chỉ chia theo SỐ TRANG (>40), hoàn toàn không biết gì
+// về DUNG LƯỢNG từng phần. 1 PDF quét DPI rất cao vẫn có thể vượt trần cứng
+// ~32MB base64 của chính API Claude dù chỉ 12 trang (12 trang x ~3.8MB/trang =
+// quá lớn) — trước đây bị chặn tay ở app với thông báo "không có cách nào gửi
+// nặng hơn", trong khi cách thật để xử lý (chia theo dung lượng, y hệt cách đã
+// làm cho PDF nhiều trang) CHƯA TỪNG được cài. Giờ chia theo NGƯỠNG NHỎ HƠN
+// giữa (a) số trang tối đa và (b) số trang ước tính vừa dung lượng an toàn —
+// sau khi ghép thật, nếu 1 phần vẫn lỡ vượt ngưỡng (trang không đều nhau, có
+// trang quét nặng hơn hẳn mức trung bình) thì TỰ CHIA ĐÔI phần đó tiếp, đệ quy
+// tới khi mọi phần đều an toàn hoặc chỉ còn đúng 1 trang (khi đó không chia
+// được nữa — báo lỗi rõ, đây mới là trần THẬT không giải quyết được).
+const NGUONG_KICH_THUOC_AN_TOAN_BYTES = 18 * 1024 * 1024; // 18MB raw ≈ 24MB base64, chừa margin dưới trần ~32MB base64 của Claude API
+
+async function chiaPdfTheoTrang(src, tuIdx, denIdxKhongBaoGom) {
+  const { PDFDocument } = require("pdf-lib");
+  const newDoc = await PDFDocument.create();
+  const indices = [];
+  for (let i = tuIdx; i < denIdxKhongBaoGom; i++) indices.push(i);
+  const copiedPages = await newDoc.copyPages(src, indices);
+  copiedPages.forEach((p) => newDoc.addPage(p));
+  const outBytes = await newDoc.save();
+  return Buffer.from(outBytes);
+}
+
+// Chia 1 khoảng trang [tuIdx, denIdxKhongBaoGom) thành các phần AN TOÀN dung
+// lượng — đệ quy chia đôi nếu ghép thật ra vẫn vượt ngưỡng.
+async function chiaAnToanDungLuong(src, tuIdx, denIdxKhongBaoGom, ketQua) {
+  const soTrang = denIdxKhongBaoGom - tuIdx;
+  const buf = await chiaPdfTheoTrang(src, tuIdx, denIdxKhongBaoGom);
+  if (buf.length <= NGUONG_KICH_THUOC_AN_TOAN_BYTES || soTrang <= 1) {
+    if (buf.length > NGUONG_KICH_THUOC_AN_TOAN_BYTES && soTrang <= 1) {
+      const err = new Error(`Trang ${tuIdx + 1} của PDF nặng ~${Math.round(buf.length / 1e6)}MB — vượt trần THẬT ~24MB/trang của API AI dù đã chia tới từng trang riêng. Cần giảm chất lượng quét/DPI của đúng trang này rồi xuất lại PDF.`);
+      err.status = 413;
+      throw err;
+    }
+    ketQua.push({ base64: buf.toString("base64"), tuTrang: tuIdx + 1, denTrang: denIdxKhongBaoGom });
+    return;
+  }
+  const giua = tuIdx + Math.ceil(soTrang / 2);
+  await chiaAnToanDungLuong(src, tuIdx, giua, ketQua);
+  await chiaAnToanDungLuong(src, giua, denIdxKhongBaoGom, ketQua);
+}
+
 async function chiaPdfLonNeuCanThiet(base64) {
   const { PDFDocument } = require("pdf-lib");
   const bytes = Buffer.from(base64, "base64");
   const src = await PDFDocument.load(bytes);
   const tongSoTrang = src.getPageCount();
-  if (tongSoTrang <= NGUONG_TRANG_AN_TOAN) {
-    return { tongSoTrang, cacPhan: [{ base64, tuTrang: 1, denTrang: tongSoTrang }] }; // không cần chia — giữ nguyên hành vi cũ
+
+  // Không cần chia khi vừa đủ NHỎ về SỐ TRANG lẫn DUNG LƯỢNG — giữ nguyên hành
+  // vi cũ (nhanh, không tốn thời gian ghép lại pdf-lib) cho trường hợp phổ biến.
+  if (tongSoTrang <= NGUONG_TRANG_AN_TOAN && bytes.length <= NGUONG_KICH_THUOC_AN_TOAN_BYTES) {
+    return { tongSoTrang, cacPhan: [{ base64, tuTrang: 1, denTrang: tongSoTrang }] };
   }
+
+  // Ước tính số trang/phần vừa dung lượng an toàn (dựa trung bình — chỉ để
+  // CHIA THÔ ban đầu cho nhanh, phần chính xác nằm ở bước đệ quy chia đôi bên
+  // dưới nếu ước tính trung bình sai do trang không đều nhau).
+  const trungBinhBytesMoiTrang = bytes.length / Math.max(1, tongSoTrang);
+  const soTrangVuaDungLuong = Math.max(1, Math.floor(NGUONG_KICH_THUOC_AN_TOAN_BYTES / trungBinhBytesMoiTrang));
+  const soTrangMoiPhanThoBanDau = Math.min(NGUONG_TRANG_AN_TOAN, soTrangVuaDungLuong);
+
   const cacPhan = [];
-  for (let start = 0; start < tongSoTrang; start += NGUONG_TRANG_AN_TOAN) {
-    const end = Math.min(start + NGUONG_TRANG_AN_TOAN, tongSoTrang);
-    const newDoc = await PDFDocument.create();
-    const indices = [];
-    for (let i = start; i < end; i++) indices.push(i);
-    const copiedPages = await newDoc.copyPages(src, indices);
-    copiedPages.forEach((p) => newDoc.addPage(p));
-    const outBytes = await newDoc.save();
-    cacPhan.push({ base64: Buffer.from(outBytes).toString("base64"), tuTrang: start + 1, denTrang: end });
+  for (let start = 0; start < tongSoTrang; start += soTrangMoiPhanThoBanDau) {
+    const end = Math.min(start + soTrangMoiPhanThoBanDau, tongSoTrang);
+    await chiaAnToanDungLuong(src, start, end, cacPhan);
   }
   return { tongSoTrang, cacPhan };
 }
@@ -2211,8 +2265,16 @@ app.delete("/api/backup", batBuocDangNhap, async (req, res) => {
   }
 });
 
+// SỬA LỖI THẬT (chẩn đoán từ triệu chứng: đã build+push+Render deploy xong
+// xác nhận, nhưng vẫn "treo 90%" y hệt lỗi TRƯỚC KHI sửa — nghi ngờ hợp lý
+// nhất: trình duyệt (đặc biệt Safari di động) đang chạy app.bundle.js CŨ từ
+// cache, vì trước đây KHÔNG có header Cache-Control nào — trình duyệt tự
+// quyết định cache bao lâu tuỳ ý, có thể rất lâu. Ép "no-store" — không lưu
+// cache lần nào — để LUÔN tải đúng bản mới nhất từ server, loại trừ hẳn khả
+// năng đang chạy code cũ dù deploy đã xong.
 app.get("/", (req, res) => {
   const file = path.join(__dirname, "index.html");
+  res.set("Cache-Control", "no-store");
   if (fs.existsSync(file)) return res.sendFile(file);
   res.status(404).send("Chưa có index.html — tải index.html + app.bundle.js lên GitHub cùng chỗ với server.js.");
 });
@@ -2220,6 +2282,7 @@ app.get("/app.bundle.js", (req, res) => {
   const plain = path.join(__dirname, "app.bundle.js");
   const gz = path.join(__dirname, "app.bundle.js.gz");
   res.type("application/javascript");
+  res.set("Cache-Control", "no-store");
   // Ưu tiên file thường (chạy được trên mọi trình duyệt, kể cả điện thoại)
   if (fs.existsSync(plain)) return res.sendFile(plain);
   if (fs.existsSync(gz)) {
