@@ -1931,9 +1931,12 @@ app.get("/api/jobs/:jobId/result", batBuocDangNhap, async (req, res) => {
 // phải cảnh báo nhẹ). Dùng ngưỡng an toàn 90 trang (chừa margin). Dùng pdf-lib
 // (thuần JavaScript, KHÔNG cần binary hệ thống như Poppler — cài được bình
 // thường qua npm install, không cần đổi sang Docker).
-const NGUONG_TRANG_AN_TOAN = 40; // 90 -> 40: giảm để tránh lỗi 520 (Cloudflare/Render
-// tự ngắt kết nối "im lặng" quá lâu khi 1 lần gọi PDF nhiều trang mất >90-180s)
-// — chẩn đoán thật từ triệu chứng người dùng (PDF 50-89 trang, dưới ngưỡng cũ
+const NGUONG_TRANG_AN_TOAN = 12; // 90 -> 40 -> 12: giảm tiếp vì PDF ~12-15 trang
+// (dưới ngưỡng 40 cũ) VẪN bị lỗi "Load failed" (đúng dấu hiệu Render/Cloudflare
+// tự ngắt kết nối im lặng khi 1 lần gọi PDF nhiều trang mất quá lâu) — hạ ngưỡng
+// để PDF cỡ vừa cũng tự động qua Job Queue (đã bền vững nhờ Postgres, xem docJob/
+// ghiJob), thay vì mạo hiểm xử lý trực tiếp trong 1 request dễ bị cắt giữa chừng
+// — chẩn đoán thật từ triệu chứng người dùng (PDF ~12-15 trang, dưới ngưỡng cũ
 // 90 nên gọi 1 lần duy nhất, đủ lâu để bị proxy cắt kết nối). CHỈ AN TOÀN sau
 // khi frontend đã có code chờ/đọc kết quả Job Queue (mỗi lần hỏi lại là 1
 // request ngắn, không giữ kết nối mở lâu, không bị proxy timeout).
