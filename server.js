@@ -1302,9 +1302,9 @@ function locHangMucHopLe(danhSach, canhBaoRa) {
           // SỬA LỖI THẬT (phát hiện qua điều tra kiến trúc, đúng nguyên nhân
           // "app đọc ra ít hạng mục hơn hẳn chat AI trực tiếp"): AI CÓ THỂ đã
           // đọc đúng, đầy đủ hạng mục này — nhưng nếu dùng calc_type không
-          // khớp đúng 1 trong 7 loại app hiểu, dòng bị XOÁ HOÀN TOÀN, ÂM THẦM,
+          // khớp đúng 1 trong 13 loại app hiểu, dòng bị XOÁ HOÀN TOÀN, ÂM THẦM,
           // không cảnh báo gì — người dùng tưởng nhầm là "AI không đọc được".
-          canhBaoRa.push({ ten: item.name || "(không tên)", lyDo: item.calc_type ? `calc_type "${item.calc_type}" không phải 1 trong 7 loại app hiểu được (bị loại)` : `AI không điền calc_type cho dòng này (bị loại)` });
+          canhBaoRa.push({ ten: item.name || "(không tên)", lyDo: item.calc_type ? `calc_type "${item.calc_type}" không phải 1 trong 13 loại app hiểu được (bị loại)` : `AI không điền calc_type cho dòng này (bị loại)` });
         }
       }
       if (item.evidence_region !== undefined) item.evidence_region = chuanHoaEvidenceRegion(item.evidence_region);
@@ -1761,10 +1761,29 @@ function fileJob(jobId) {
   const safe = String(jobId).replace(/[^a-zA-Z0-9_-]/g, "");
   return path.join(DATA_DIR_JOBS, `${safe}.json`);
 }
-function docJob(jobId) {
+async function docJob(jobId) {
+  // SỬA LỖI THẬT (nguyên nhân xác nhận của lỗi "Job not found" người dùng gặp):
+  // trước đây CHỈ lưu file JSON trên đĩa (data/jobs/) — Render free tier có
+  // filesystem TẠM THỜI, bị xoá sạch mỗi khi server khởi động lại (redeploy,
+  // hết RAM, hoặc tự restart định kỳ) — 1 job PDF lớn xử lý nhiều phút hoàn
+  // toàn có thể bị mất giữa chừng nếu server restart đúng lúc đó. Giờ dùng
+  // Postgres (bền vững, không mất khi restart) nếu đã cấu hình DATABASE_URL;
+  // vẫn fallback về file JSON nếu chưa có Postgres (không đổi hành vi cũ).
+  if (pgStore && process.env.DATABASE_URL) {
+    try {
+      const res = await pgStore.docStorage("_jobs", jobId);
+      return res ? JSON.parse(res) : null;
+    } catch (e) { console.error("[Job] lỗi đọc Postgres, fallback file:", e.message); }
+  }
   try { return JSON.parse(fs.readFileSync(fileJob(jobId), "utf8")); } catch (e) { return null; }
 }
-function ghiJob(job) {
+async function ghiJob(job) {
+  if (pgStore && process.env.DATABASE_URL) {
+    try {
+      await pgStore.ghiStorage("_jobs", job.jobId, JSON.stringify(job));
+      return;
+    } catch (e) { console.error("[Job] lỗi ghi Postgres, fallback file:", e.message); }
+  }
   if (!fs.existsSync(DATA_DIR_JOBS)) fs.mkdirSync(DATA_DIR_JOBS, { recursive: true });
   fs.writeFileSync(fileJob(job.jobId), JSON.stringify(job));
 }
@@ -1790,14 +1809,14 @@ function doiChieuToanCuc(cacLo) {
 }
 
 async function xuLyJobNen(jobId) {
-  const job = docJob(jobId);
+  const job = await docJob(jobId);
   if (!job) return;
   const SO_LAN_THU_LO = 3; // 1 lần gốc + 2 lần thử lại — bổ sung tầng retry Ở CẤP LÔ, khác với retry đã có sẵn TRONG callUnifiedAI (retry đó chỉ ~6s tổng cộng, không đủ nếu mạng gián đoạn lâu hơn)
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
     if (lo.trangThai === "xong") continue; // đã xử lý (khi resume), bỏ qua
     lo.trangThai = "dang_chay";
-    ghiJob(job);
+    await ghiJob(job);
 
     let thanhCong = false, loiLanCuoi = "";
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
@@ -1829,10 +1848,10 @@ async function xuLyJobNen(jobId) {
       lo.trangThai = "loi";
       lo.loi = loiLanCuoi;
     }
-    ghiJob(job); // lưu NGAY sau mỗi lô — không mất tiến độ nếu bị gián đoạn
+    await ghiJob(job); // lưu NGAY sau mỗi lô — không mất tiến độ nếu bị gián đoạn
   }
   job.trangThaiTong = job.cacLo.every((l) => l.trangThai === "xong") ? "xong" : "co_loi";
-  ghiJob(job);
+  await ghiJob(job);
 }
 
 // GIỚI HẠN SỐ JOB CHẠY NỀN ĐỒNG THỜI — KHÁC với gioiHanDongThoi (đếm HTTP
@@ -1862,7 +1881,7 @@ app.post("/api/jobs/batch-analyze", batBuocDangNhap, async (req, res) => {
       tongSoAnh: images.length, tongSoLo: cacLo.length, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu,
       cacLo, trangThaiTong: "dang_chay",
     };
-    ghiJob(job);
+    await ghiJob(job);
     soJobDangChayNen++;
     xuLyJobNen(jobId)
       .catch((e) => console.error("[Job] lỗi xử lý nền:", jobId, e.message))
@@ -1873,8 +1892,8 @@ app.post("/api/jobs/batch-analyze", batBuocDangNhap, async (req, res) => {
   }
 });
 
-app.get("/api/jobs/:jobId/status", batBuocDangNhap, (req, res) => {
-  const job = docJob(req.params.jobId);
+app.get("/api/jobs/:jobId/status", batBuocDangNhap, async (req, res) => {
+  const job = await docJob(req.params.jobId);
   if (!job) return res.status(404).json({ error: "Không tìm thấy job (có thể đã hết hạn hoặc jobId sai)." });
   const soLoXong = job.cacLo.filter((l) => l.trangThai === "xong").length;
   const soLoLoi = job.cacLo.filter((l) => l.trangThai === "loi").length;
@@ -1885,8 +1904,8 @@ app.get("/api/jobs/:jobId/status", batBuocDangNhap, (req, res) => {
   });
 });
 
-app.get("/api/jobs/:jobId/result", batBuocDangNhap, (req, res) => {
-  const job = docJob(req.params.jobId);
+app.get("/api/jobs/:jobId/result", batBuocDangNhap, async (req, res) => {
+  const job = await docJob(req.params.jobId);
   if (!job) return res.status(404).json({ error: "Không tìm thấy job." });
   if (job.trangThaiTong === "dang_chay") return res.status(202).json({ error: "Job chưa xử lý xong, thử lại sau.", trangThaiTong: job.trangThaiTong });
   const items = job.cacLo.flatMap((l) => l.items || []);
@@ -1941,14 +1960,14 @@ async function chiaPdfLonNeuCanThiet(base64) {
 }
 
 async function xuLyJobPdfLon(jobId) {
-  const job = docJob(jobId);
+  const job = await docJob(jobId);
   if (!job) return;
   const SO_LAN_THU_LO = 3;
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
     if (lo.trangThai === "xong") continue;
     lo.trangThai = "dang_chay";
-    ghiJob(job);
+    await ghiJob(job);
 
     let thanhCong = false, loiLanCuoi = "";
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
@@ -1976,10 +1995,10 @@ async function xuLyJobPdfLon(jobId) {
       }
     }
     if (!thanhCong) { lo.trangThai = "loi"; lo.loi = loiLanCuoi; }
-    ghiJob(job);
+    await ghiJob(job);
   }
   job.trangThaiTong = job.cacLo.every((l) => l.trangThai === "xong") ? "xong" : "co_loi";
-  ghiJob(job);
+  await ghiJob(job);
 }
 
 app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
@@ -2020,7 +2039,7 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
       cacLo: cacPhan.map((p, idx) => ({ soLo: idx + 1, pdfBase64: p.base64, tuTrang: p.tuTrang, denTrang: p.denTrang, trangThai: "cho", items: [], loi: null })),
       trangThaiTong: "dang_chay",
     };
-    ghiJob(job);
+    await ghiJob(job);
     soJobDangChayNen++;
     xuLyJobPdfLon(jobId).catch((e) => console.error("[Job PDF] Lỗi:", jobId, e.message)).finally(() => { soJobDangChayNen = Math.max(0, soJobDangChayNen - 1); });
     res.json({ jobId, tongSoTrang, tongSoLo: cacPhan.length, trangThai: "dang_chay", ghiChu: `PDF có ${tongSoTrang} trang, vượt ngưỡng an toàn ${NGUONG_TRANG_AN_TOAN} trang của Claude API — tự động chia thành ${cacPhan.length} phần, xử lý nền.` });
