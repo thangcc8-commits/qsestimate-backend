@@ -100,11 +100,7 @@ if (ALLOWED_ORIGIN === "*") {
 // và API key được giữ kín phía server, không lộ ra ngoài dù nguồn gọi là gì.
 app.use(cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN }));
 app.options("*", cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN })); // trả lời yêu cầu "thăm dò" (preflight) của trình duyệt
-app.use(express.json({ limit: "110mb" })); // SỬA: nâng từ 40mb — giờ server tự chia PDF theo dung lượng
-// (xem chiaPdfLonNeuCanThiet), nên trần thật cần đủ rộng cho cả file TRƯỚC KHI
-// chia (base64 hoá phình ~33% so với file gốc) — 110mb đủ cho file gốc tới
-// ~80MB, khớp với HARD_MAX phía app. Vẫn có giới hạn để tránh 1 request khổng
-// lồ bất thường làm tràn bộ nhớ server (RAM Render có hạn).
+app.use(express.json({ limit: "40mb" })); // dư địa an toàn — trần thật nằm ở phía Anthropic (32MB), không phải ở đây
 
 // ---- Bảo mật HTTP cơ bản (không cần package helmet) ----
 app.disable("x-powered-by");
@@ -234,14 +230,65 @@ async function fetchCoTimeout(url, options) {
     clearTimeout(timer);
   }
 }
+// SỬA KIẾN TRÚC THẬT (phát hiện qua so sánh trực tiếp với cách khung chat
+// Claude.ai đọc file lớn nhanh hơn nhiều — 3-4 phút cho file 50MB+, trong khi
+// app trước đây phải chia thành nhiều lô 12 trang, gọi tuần tự, mỗi lô tới
+// ~6 phút): nguồn gốc KHÔNG PHẢI do file lớn tự nhiên chậm, mà do cách gửi —
+// nhúng base64 trực tiếp vào request bị giới hạn CỨNG 32MB cho TOÀN BỘ request
+// payload (theo tài liệu chính thức platform.claude.com/docs/pdf-support).
+// Dùng Files API (upload 1 lần, gửi lại bằng file_id nhỏ gọn) né được giới hạn
+// này hoàn toàn — giới hạn thật còn lại chỉ là SỐ TRANG (600, hoặc 100 nếu
+// context window dưới 1M token) — cao hơn RẤT NHIỀU so với ngưỡng 12 trang cũ.
+async function uploadPdfToFilesApi(base64, filename) {
+  const buffer = Buffer.from(base64, "base64");
+  const form = new FormData();
+  form.append("file", new Blob([buffer], { type: "application/pdf" }), filename || "banve.pdf");
+  const resp = await fetchCoTimeout("https://api.anthropic.com/v1/files", {
+    method: "POST",
+    headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-beta": "files-api-2025-04-14" },
+    body: form,
+  }, 60000); // upload riêng, timeout dài hơn tuỳ dung lượng nhưng vẫn cần trần
+  let data;
+  try { data = await resp.json(); } catch (e) { throw new Error(`Files API trả về dữ liệu không hợp lệ (HTTP ${resp.status})`); }
+  if (!resp.ok) throw new Error(`Upload Files API lỗi: ${data?.error?.message || `HTTP ${resp.status}`}`);
+  return data.id; // file_id — dùng lại trong content block {type:"document", source:{type:"file", file_id}}
+}
+
+// Ngưỡng dung lượng để quyết định dùng Files API thay vì base64 inline — dưới
+// ngưỡng này, overhead của 1 request upload riêng không đáng so với gửi thẳng.
+const NGUONG_DUNG_LUONG_DUNG_FILES_API = 15 * 1024 * 1024; // 15MB raw
+
+// Tự động thay MỌI block "document" base64 đủ lớn bằng file_id đã upload sẵn —
+// KHÔNG đổi interface của contentBlocks (vẫn nhận/trả cùng dạng mảng), chỉ biến
+// đổi NGAY TRƯỚC khi gửi — giữ nguyên toàn bộ logic gọi AI ở nơi khác, giảm rủi
+// ro so với viết lại toàn bộ luồng.
+async function chuanBiContentBlocksChoClaude(contentBlocks) {
+  const ketQua = [];
+  for (const block of contentBlocks) {
+    if (block.type === "document" && block.source?.type === "base64") {
+      const rawSize = Math.round((block.source.data.length * 3) / 4);
+      if (rawSize >= NGUONG_DUNG_LUONG_DUNG_FILES_API) {
+        const fileId = await uploadPdfToFilesApi(block.source.data, block.source.filename);
+        ketQua.push({ type: "document", source: { type: "file", file_id: fileId } });
+        continue;
+      }
+    }
+    ketQua.push(block);
+  }
+  return ketQua;
+}
+
 async function callClaude(contentBlocks, betaHeader) {
+  // Chuẩn bị TRƯỚC vòng retry — nếu phải upload Files API, chỉ upload 1 LẦN
+  // (không upload lại mỗi lần retry request messages, tốn thời gian/tiền vô ích).
+  const contentBlocksThat = await chuanBiContentBlocksChoClaude(contentBlocks);
   const headers = {
     "Content-Type": "application/json",
     "x-api-key": ANTHROPIC_API_KEY,
     "anthropic-version": "2023-06-01",
   };
   if (betaHeader) headers["anthropic-beta"] = betaHeader;
-  const body = JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 16000, messages: [{ role: "user", content: contentBlocks }] });
+  const body = JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 16000, messages: [{ role: "user", content: contentBlocksThat }] });
 
   const SO_LAN_TOI_DA = 3; // 1 lần gốc + tối đa 2 lần thử lại (lỗi mạng thật)
   const SO_LAN_TOI_DA_TIMEOUT = 2; // 1 lần gốc + 1 lần thử lại — SỬA LỖI THẬT
@@ -1226,6 +1273,58 @@ function chuanHoaEvidenceRegion(r) {
   return { x: +x.toFixed(4), y: +y.toFixed(4), w: +w.toFixed(4), h: +h.toFixed(4) };
 }
 
+// Bộ giải BIỂU THỨC TOÁN HỌC AN TOÀN — cho AI viết công thức phức tạp (chu vi,
+// nhân hệ số, trừ nhiều lỗ mở trong 1 biểu thức) khi 13 loại calc_type hình học
+// cố định không đủ linh hoạt để diễn đạt. CHỈ chấp nhận số + 4 phép tính + ngoặc
+// (regex chặn CỨNG trước khi parse) — không có eval()/Function() nào được gọi,
+// không có đường nào chạy được code tuỳ ý (đã kiểm chứng bằng test độc lập:
+// "require(1)" và mọi ký tự chữ đều bị chặn ngay từ bước sanitize). Ngưỡng
+// kết quả 0 ≤ x ≤ 1e9 chặn cả số âm (khối lượng không thể âm) lẫn số quá lớn
+// bất thường (dấu hiệu AI tính sai/nhân nhầm đơn vị).
+function danhGiaBieuThucToanHoc(expr) {
+  if (!expr || typeof expr !== "string") return null;
+  const sanitized = expr.replace(/\s+/g, "");
+  if (!/^[0-9+\-*/().]+$/.test(sanitized)) return null;
+  const tokens = sanitized.match(/(\d+(?:\.\d+)?|[+\-*/()])/g);
+  if (!tokens) return null;
+  let pos = 0;
+  function parseExpression() {
+    let val = parseTerm();
+    while (pos < tokens.length && (tokens[pos] === "+" || tokens[pos] === "-")) {
+      const op = tokens[pos++]; const nextVal = parseTerm();
+      val = op === "+" ? val + nextVal : val - nextVal;
+    }
+    return val;
+  }
+  function parseTerm() {
+    let val = parseFactor();
+    while (pos < tokens.length && (tokens[pos] === "*" || tokens[pos] === "/")) {
+      const op = tokens[pos++]; const nextVal = parseFactor();
+      if (op === "/" && nextVal === 0) return null;
+      val = op === "*" ? val * nextVal : val / nextVal;
+    }
+    return val;
+  }
+  function parseFactor() {
+    if (pos >= tokens.length) return null;
+    const token = tokens[pos++];
+    if (token === "(") { const val = parseExpression(); if (pos >= tokens.length || tokens[pos++] !== ")") return null; return val; }
+    if (token === "-") return -parseFactor();
+    if (token === "+") return parseFactor();
+    const num = Number(token);
+    return Number.isFinite(num) ? num : null;
+  }
+  try {
+    const result = parseExpression();
+    if (pos !== tokens.length || !Number.isFinite(result) || result < 0 || result > 1e9) return null;
+    return +result.toFixed(4);
+  } catch (e) { return null; }
+}
+function tinhQtyTheoBieuThuc(fi) {
+  if (!fi || typeof fi !== "object") return null;
+  return danhGiaBieuThucToanHoc(fi.bieu_thuc || fi.formula_expr);
+}
+
 // VALIDATE toàn bộ hạng mục AI trả về TRƯỚC KHI gửi cho app ghi vào state (mục 2
 // yêu cầu) — loại bỏ dòng rác: thiếu tên, khối lượng âm/NaN, đơn vị rỗng, group
 // không hợp lệ. Không sửa/bịa giá trị — chỉ LOẠI những dòng rõ ràng hỏng, giữ
@@ -1249,6 +1348,7 @@ const BANG_CONG_THUC_ENGINE = {
   tinh_theo_chieu_dai: { fn: tinhQtyTheoChieuDai, moTa: (fi) => `${fi?.dai_m}m × ${fi?.so_luong ?? 1} (m)` },
   tinh_thep_kg: { fn: tinhQtyThepKg, moTa: (fi) => `${fi?.dai_m}m × ${fi?.so_luong ?? 1} thanh × ${fi?.kg_m}kg/m (kg)` },
   tinh_thep_kg_truc_tiep: { fn: tinhQtyThepTuKhoiLuong, moTa: (fi) => `${fi?.kg}kg × ${fi?.so_luong ?? 1} (kg)` },
+  tinh_theo_bieu_thuc: { fn: tinhQtyTheoBieuThuc, moTa: (fi) => `biểu thức [${fi?.bieu_thuc || fi?.formula_expr}]` },
 };
 
 // Đơn vị ĐÚNG theo calc_type — Engine ĐÃ BIẾT CHẮC CHẮN đơn vị nào đúng cho
@@ -1324,9 +1424,9 @@ function locHangMucHopLe(danhSach, canhBaoRa) {
           // SỬA LỖI THẬT (phát hiện qua điều tra kiến trúc, đúng nguyên nhân
           // "app đọc ra ít hạng mục hơn hẳn chat AI trực tiếp"): AI CÓ THỂ đã
           // đọc đúng, đầy đủ hạng mục này — nhưng nếu dùng calc_type không
-          // khớp đúng 1 trong 13 loại app hiểu, dòng trước đây bị XOÁ HOÀN
+          // khớp đúng 1 trong 14 loại app hiểu, dòng trước đây bị XOÁ HOÀN
           // TOÀN, ÂM THẦM — người dùng tưởng nhầm là "AI không đọc được".
-          const lyDoGoc = item.calc_type ? `calc_type "${item.calc_type}" không phải 1 trong 13 loại app hiểu được` : `AI không điền calc_type cho dòng này`;
+          const lyDoGoc = item.calc_type ? `calc_type "${item.calc_type}" không phải 1 trong 14 loại app hiểu được` : `AI không điền calc_type cho dòng này`;
           canhBaoRa.push({ ten: item.name || "(không tên)", lyDo: coSoAiTuBao ? `${lyDoGoc} — ĐÃ GIỮ LẠI dùng số AI tự báo (${qtyAiTuBao}), CẦN QS xác nhận lại` : `${lyDoGoc} và AI cũng không có số nào để dùng tạm (bị loại)` });
         }
       }
@@ -1439,6 +1539,7 @@ const TAKEOFF_PROMPT_GOC =
   '• "tinh_theo_chieu_dai" — mét dài cáp/ống/nẹp/lan can... khi có chiều dài + số lượng. "formula_inputs": {"dai_m":..., "so_luong":...}. ' +
   '• "tinh_thep_kg" — thép có chiều dài thanh + số thanh + khối lượng kg/m. "formula_inputs": {"dai_m":..., "so_luong":..., "kg_m":...}. ' +
   '• "tinh_thep_kg_truc_tiep" — bảng thống kê đã có sẵn kg/thanh hoặc tổng kg rõ ràng. "formula_inputs": {"kg":..., "so_luong":...}. ' +
+  '• "tinh_theo_bieu_thuc" — CHỈ dùng khi hình dạng phức tạp không khớp đúng 13 loại trên (VD chu vi × cao − nhiều lỗ mở cộng dồn trong 1 công thức). "formula_inputs": {"bieu_thuc": "(5.2+4.8)*2*3.3 - 2.5"} — chỉ được dùng số + 4 phép tính (+ - * /) + ngoặc, KHÔNG được viết chữ/hàm nào khác. Ưu tiên 13 loại cụ thể trên trước, chỉ dùng loại này khi thực sự cần thiết. ' +
   '\n\n' +
   'BẮT BUỘC: "calc_type" CHỈ ĐƯỢC là ĐÚNG 1 trong 13 giá trị đã liệt kê ở trên — TUYỆT ĐỐI KHÔNG được tự đặt tên khác ' +
   '(VD không được viết "tinh_dien_tich_son", "dien_tich_tran", hay bất kỳ tên nào khác không có trong 13 giá trị đó) — ' +
@@ -1482,7 +1583,7 @@ const TAKEOFF_PROMPT_GOC =
   'Nếu không có mã hiệu rõ ràng hoặc chỉ có 1 nguồn duy nhất, để null. ' +
   'Đúng định dạng — TUYỆT ĐỐI KHÔNG có trường "qty" (AI không quyết định khối lượng cuối, chỉ báo cáo số đo thô): ' +
   '[{"name":"tên hạng mục ngắn gọn","unit":"đơn vị","group":"mong|khung|hoanthien|mep",' +
-  '"calc_type":"doc_truc_tiep|dem_so_luong|tinh_tu_kich_thuoc_tuong|tinh_tu_kich_thuoc_cot|tinh_tu_kich_thuoc_dam|tinh_tu_kich_thuoc_mong|tinh_tu_kich_thuoc_san|tinh_dien_tich_hinh_chu_nhat|tinh_chu_vi_hinh_chu_nhat|tinh_the_tich_hinh_hop|tinh_theo_chieu_dai|tinh_thep_kg|tinh_thep_kg_truc_tiep",' +
+  '"calc_type":"doc_truc_tiep|dem_so_luong|tinh_tu_kich_thuoc_tuong|tinh_tu_kich_thuoc_cot|tinh_tu_kich_thuoc_dam|tinh_tu_kich_thuoc_mong|tinh_tu_kich_thuoc_san|tinh_dien_tich_hinh_chu_nhat|tinh_chu_vi_hinh_chu_nhat|tinh_the_tich_hinh_hop|tinh_theo_chieu_dai|tinh_thep_kg|tinh_thep_kg_truc_tiep|tinh_theo_bieu_thuc",' +
   '"formula_inputs":object đúng khuôn dạng calc_type tương ứng ở trên (BẮT BUỘC có, không được null),' +
   '"confidence":số 0-1 (AI tự đánh giá độ tự tin vào số đo mình đưa ra — 1 = rất chắc chắn, 0.3 = ước lượng mơ hồ),' +
   '"evidence_region":null hoặc {"x":số,"y":số,"w":số,"h":số},"declared_scale":null hoặc "1:100",' +
@@ -1834,7 +1935,14 @@ function doiChieuToanCuc(cacLo) {
 async function xuLyJobNen(jobId) {
   const job = await docJob(jobId);
   if (!job) return;
-  const SO_LAN_THU_LO = 3; // 1 lần gốc + 2 lần thử lại — bổ sung tầng retry Ở CẤP LÔ, khác với retry đã có sẵn TRONG callUnifiedAI (retry đó chỉ ~6s tổng cộng, không đủ nếu mạng gián đoạn lâu hơn)
+  // SỬA LỖI THẬT (tính toán từ số liệu thật): 3 lần thử × 180s timeout/lần =
+  // tối đa ~9.25 phút CHO 1 LÔ — với PDF nhiều lô (xử lý TUẦN TỰ, không song
+  // song), 3 lô tệ nhất cộng dồn tới ~28 phút, VƯỢT XA trần chờ 10 phút phía
+  // trình duyệt (xem QsEstimateApp.jsx) — app "bỏ cuộc" trong khi server vẫn
+  // đang chạy tiếp, không ai thấy kết quả nữa ("treo, không trả khối lượng").
+  // Giảm còn 2 lần thử (1 gốc + 1 lại) — vẫn đủ chống lỗi mạng tạm thời, giảm
+  // trần tối đa mỗi lô xuống ~6.2 phút, khớp với trần chờ mới phía trình duyệt.
+  const SO_LAN_THU_LO = 2;
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
     if (lo.trangThai === "xong") continue; // đã xử lý (khi resume), bỏ qua
@@ -1962,80 +2070,37 @@ app.get("/api/jobs/:jobId/result", batBuocDangNhap, async (req, res) => {
 // phải cảnh báo nhẹ). Dùng ngưỡng an toàn 90 trang (chừa margin). Dùng pdf-lib
 // (thuần JavaScript, KHÔNG cần binary hệ thống như Poppler — cài được bình
 // thường qua npm install, không cần đổi sang Docker).
-const NGUONG_TRANG_AN_TOAN = 40; // 90 -> 40: giảm để tránh lỗi 520 (Cloudflare/Render
+const NGUONG_TRANG_AN_TOAN = 80; // 90 -> 40 -> 80: SỬA GỐC RỄ THẬT — lý do phải
+// chia nhỏ trước đây là giới hạn 32MB CHO TOÀN BỘ REQUEST khi nhúng base64 trực
+// tiếp (đã xác nhận qua tài liệu chính thức platform.claude.com/docs). Giờ dùng
+// Files API cho file lớn (xem uploadPdfToFilesApi/chuanBiContentBlocksChoClaude)
+// — request chỉ còn file_id nhỏ gọn, KHÔNG còn bị giới hạn 32MB đó nữa. Ngưỡng
+// còn lại CHỈ là số trang thật của API (100 khi context <1M token) — 80 chừa
+// margin an toàn. Đây là lý do khung chat Claude.ai đọc file 50MB+ chỉ mất 3-4
+// phút — không phải do "may mắn", mà do KHÔNG chia nhỏ/gọi tuần tự nhiều lần.
 // tự ngắt kết nối "im lặng" quá lâu khi 1 lần gọi PDF nhiều trang mất >90-180s)
 // — chẩn đoán thật từ triệu chứng người dùng (PDF 50-89 trang, dưới ngưỡng cũ
 // 90 nên gọi 1 lần duy nhất, đủ lâu để bị proxy cắt kết nối). CHỈ AN TOÀN sau
 // khi frontend đã có code chờ/đọc kết quả Job Queue (mỗi lần hỏi lại là 1
 // request ngắn, không giữ kết nối mở lâu, không bị proxy timeout).
-// SỬA LỖI THẬT (chẩn đoán từ triệu chứng người dùng: file "A7-14.pdf" 45.4MB/
-// 12 trang bị app CHẶN THẲNG ở phía trình duyệt trước khi kịp gửi lên server —
-// vì hàm này TRƯỚC ĐÂY chỉ chia theo SỐ TRANG (>40), hoàn toàn không biết gì
-// về DUNG LƯỢNG từng phần. 1 PDF quét DPI rất cao vẫn có thể vượt trần cứng
-// ~32MB base64 của chính API Claude dù chỉ 12 trang (12 trang x ~3.8MB/trang =
-// quá lớn) — trước đây bị chặn tay ở app với thông báo "không có cách nào gửi
-// nặng hơn", trong khi cách thật để xử lý (chia theo dung lượng, y hệt cách đã
-// làm cho PDF nhiều trang) CHƯA TỪNG được cài. Giờ chia theo NGƯỠNG NHỎ HƠN
-// giữa (a) số trang tối đa và (b) số trang ước tính vừa dung lượng an toàn —
-// sau khi ghép thật, nếu 1 phần vẫn lỡ vượt ngưỡng (trang không đều nhau, có
-// trang quét nặng hơn hẳn mức trung bình) thì TỰ CHIA ĐÔI phần đó tiếp, đệ quy
-// tới khi mọi phần đều an toàn hoặc chỉ còn đúng 1 trang (khi đó không chia
-// được nữa — báo lỗi rõ, đây mới là trần THẬT không giải quyết được).
-const NGUONG_KICH_THUOC_AN_TOAN_BYTES = 18 * 1024 * 1024; // 18MB raw ≈ 24MB base64, chừa margin dưới trần ~32MB base64 của Claude API
-
-async function chiaPdfTheoTrang(src, tuIdx, denIdxKhongBaoGom) {
-  const { PDFDocument } = require("pdf-lib");
-  const newDoc = await PDFDocument.create();
-  const indices = [];
-  for (let i = tuIdx; i < denIdxKhongBaoGom; i++) indices.push(i);
-  const copiedPages = await newDoc.copyPages(src, indices);
-  copiedPages.forEach((p) => newDoc.addPage(p));
-  const outBytes = await newDoc.save();
-  return Buffer.from(outBytes);
-}
-
-// Chia 1 khoảng trang [tuIdx, denIdxKhongBaoGom) thành các phần AN TOÀN dung
-// lượng — đệ quy chia đôi nếu ghép thật ra vẫn vượt ngưỡng.
-async function chiaAnToanDungLuong(src, tuIdx, denIdxKhongBaoGom, ketQua) {
-  const soTrang = denIdxKhongBaoGom - tuIdx;
-  const buf = await chiaPdfTheoTrang(src, tuIdx, denIdxKhongBaoGom);
-  if (buf.length <= NGUONG_KICH_THUOC_AN_TOAN_BYTES || soTrang <= 1) {
-    if (buf.length > NGUONG_KICH_THUOC_AN_TOAN_BYTES && soTrang <= 1) {
-      const err = new Error(`Trang ${tuIdx + 1} của PDF nặng ~${Math.round(buf.length / 1e6)}MB — vượt trần THẬT ~24MB/trang của API AI dù đã chia tới từng trang riêng. Cần giảm chất lượng quét/DPI của đúng trang này rồi xuất lại PDF.`);
-      err.status = 413;
-      throw err;
-    }
-    ketQua.push({ base64: buf.toString("base64"), tuTrang: tuIdx + 1, denTrang: denIdxKhongBaoGom });
-    return;
-  }
-  const giua = tuIdx + Math.ceil(soTrang / 2);
-  await chiaAnToanDungLuong(src, tuIdx, giua, ketQua);
-  await chiaAnToanDungLuong(src, giua, denIdxKhongBaoGom, ketQua);
-}
-
 async function chiaPdfLonNeuCanThiet(base64) {
   const { PDFDocument } = require("pdf-lib");
   const bytes = Buffer.from(base64, "base64");
   const src = await PDFDocument.load(bytes);
   const tongSoTrang = src.getPageCount();
-
-  // Không cần chia khi vừa đủ NHỎ về SỐ TRANG lẫn DUNG LƯỢNG — giữ nguyên hành
-  // vi cũ (nhanh, không tốn thời gian ghép lại pdf-lib) cho trường hợp phổ biến.
-  if (tongSoTrang <= NGUONG_TRANG_AN_TOAN && bytes.length <= NGUONG_KICH_THUOC_AN_TOAN_BYTES) {
-    return { tongSoTrang, cacPhan: [{ base64, tuTrang: 1, denTrang: tongSoTrang }] };
+  if (tongSoTrang <= NGUONG_TRANG_AN_TOAN) {
+    return { tongSoTrang, cacPhan: [{ base64, tuTrang: 1, denTrang: tongSoTrang }] }; // không cần chia — giữ nguyên hành vi cũ
   }
-
-  // Ước tính số trang/phần vừa dung lượng an toàn (dựa trung bình — chỉ để
-  // CHIA THÔ ban đầu cho nhanh, phần chính xác nằm ở bước đệ quy chia đôi bên
-  // dưới nếu ước tính trung bình sai do trang không đều nhau).
-  const trungBinhBytesMoiTrang = bytes.length / Math.max(1, tongSoTrang);
-  const soTrangVuaDungLuong = Math.max(1, Math.floor(NGUONG_KICH_THUOC_AN_TOAN_BYTES / trungBinhBytesMoiTrang));
-  const soTrangMoiPhanThoBanDau = Math.min(NGUONG_TRANG_AN_TOAN, soTrangVuaDungLuong);
-
   const cacPhan = [];
-  for (let start = 0; start < tongSoTrang; start += soTrangMoiPhanThoBanDau) {
-    const end = Math.min(start + soTrangMoiPhanThoBanDau, tongSoTrang);
-    await chiaAnToanDungLuong(src, start, end, cacPhan);
+  for (let start = 0; start < tongSoTrang; start += NGUONG_TRANG_AN_TOAN) {
+    const end = Math.min(start + NGUONG_TRANG_AN_TOAN, tongSoTrang);
+    const newDoc = await PDFDocument.create();
+    const indices = [];
+    for (let i = start; i < end; i++) indices.push(i);
+    const copiedPages = await newDoc.copyPages(src, indices);
+    copiedPages.forEach((p) => newDoc.addPage(p));
+    const outBytes = await newDoc.save();
+    cacPhan.push({ base64: Buffer.from(outBytes).toString("base64"), tuTrang: start + 1, denTrang: end });
   }
   return { tongSoTrang, cacPhan };
 }
@@ -2043,7 +2108,7 @@ async function chiaPdfLonNeuCanThiet(base64) {
 async function xuLyJobPdfLon(jobId) {
   const job = await docJob(jobId);
   if (!job) return;
-  const SO_LAN_THU_LO = 3;
+  const SO_LAN_THU_LO = 2; // đồng bộ với xuLyJobNen — xem giải thích ở đó
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
     if (lo.trangThai === "xong") continue;
@@ -2265,16 +2330,8 @@ app.delete("/api/backup", batBuocDangNhap, async (req, res) => {
   }
 });
 
-// SỬA LỖI THẬT (chẩn đoán từ triệu chứng: đã build+push+Render deploy xong
-// xác nhận, nhưng vẫn "treo 90%" y hệt lỗi TRƯỚC KHI sửa — nghi ngờ hợp lý
-// nhất: trình duyệt (đặc biệt Safari di động) đang chạy app.bundle.js CŨ từ
-// cache, vì trước đây KHÔNG có header Cache-Control nào — trình duyệt tự
-// quyết định cache bao lâu tuỳ ý, có thể rất lâu. Ép "no-store" — không lưu
-// cache lần nào — để LUÔN tải đúng bản mới nhất từ server, loại trừ hẳn khả
-// năng đang chạy code cũ dù deploy đã xong.
 app.get("/", (req, res) => {
   const file = path.join(__dirname, "index.html");
-  res.set("Cache-Control", "no-store");
   if (fs.existsSync(file)) return res.sendFile(file);
   res.status(404).send("Chưa có index.html — tải index.html + app.bundle.js lên GitHub cùng chỗ với server.js.");
 });
@@ -2282,7 +2339,6 @@ app.get("/app.bundle.js", (req, res) => {
   const plain = path.join(__dirname, "app.bundle.js");
   const gz = path.join(__dirname, "app.bundle.js.gz");
   res.type("application/javascript");
-  res.set("Cache-Control", "no-store");
   // Ưu tiên file thường (chạy được trên mọi trình duyệt, kể cả điện thoại)
   if (fs.existsSync(plain)) return res.sendFile(plain);
   if (fs.existsSync(gz)) {
