@@ -100,7 +100,7 @@ if (ALLOWED_ORIGIN === "*") {
 // và API key được giữ kín phía server, không lộ ra ngoài dù nguồn gọi là gì.
 app.use(cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN }));
 app.options("*", cors({ origin: ALLOWED_ORIGIN === "*" ? true : ALLOWED_ORIGIN })); // trả lời yêu cầu "thăm dò" (preflight) của trình duyệt
-app.use(express.json({ limit: "40mb" })); // dư địa an toàn — trần thật nằm ở phía Anthropic (32MB), không phải ở đây
+app.use(express.json({ limit: "60mb" })); // SỬA LỖI THẬT (xác minh qua đối chiếu với HARD_MAX=22MB thật của frontend, KHÔNG phải 80MB như 1 báo cáo audit từng nêu — con số đó không khớp code thật): 22MB base64 hoá ~30MB, quá sát trần 40mb cũ; tăng lên 60mb để có dư địa an toàn hơn, không phải vì frontend thật sự cho phép tới 80MB — trần thật vẫn nằm ở phía Anthropic (32MB/request, đã né qua Files API cho file lớn)
 
 // ---- Bảo mật HTTP cơ bản (không cần package helmet) ----
 app.disable("x-powered-by");
@@ -214,14 +214,15 @@ const AI_TIMEOUT_MS = 180_000; // 90s -> 180s: chẩn đoán thật từ triệu
 // (PDF 50-89 trang, dưới ngưỡng chia job 90 trang nên gọi 1 lần duy nhất, cần
 // nhiều thời gian hơn 90s để Claude đọc hết + sinh danh sách BOQ dài) — lỗi
 // đúng là do AbortController CỦA APP tự ngắt ở 90s, không phải Render cắt.
-async function fetchCoTimeout(url, options) {
+async function fetchCoTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+  const thoiGianCho = timeoutMs || AI_TIMEOUT_MS; // SỬA LỖI THẬT (phát hiện qua review độc lập): trước đây hàm chỉ nhận 2 tham số, bỏ qua timeoutMs truyền vào (VD upload Files API gọi với ý định 60s nhưng luôn chạy 180s cứng) — không sai chức năng (180s > 60s vẫn an toàn hơn dự định) nhưng là code chết gây hiểu lầm khi debug
+  const timer = setTimeout(() => controller.abort(), thoiGianCho);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (e) {
     if (e.name === "AbortError") {
-      const err = new Error(`Hết thời gian chờ (${AI_TIMEOUT_MS / 1000}s) — AI không phản hồi kịp, thử lại hoặc dùng ảnh nhỏ/ít trang hơn.`);
+      const err = new Error(`Hết thời gian chờ (${thoiGianCho / 1000}s) — AI không phản hồi kịp, thử lại hoặc dùng ảnh nhỏ/ít trang hơn.`);
       err.status = 504;
       throw err;
     }
@@ -262,26 +263,43 @@ const NGUONG_DUNG_LUONG_DUNG_FILES_API = 15 * 1024 * 1024; // 15MB raw
 // KHÔNG đổi interface của contentBlocks (vẫn nhận/trả cùng dạng mảng), chỉ biến
 // đổi NGAY TRƯỚC khi gửi — giữ nguyên toàn bộ logic gọi AI ở nơi khác, giảm rủi
 // ro so với viết lại toàn bộ luồng.
+// SỬA LỖI THẬT (phát hiện qua review độc lập, xác nhận không có lệnh DELETE
+// nào cho Files API trong toàn bộ server.js trước đây): file PDF upload lên
+// Files API tồn TÀI VĨNH VIỄN trên tài khoản Anthropic nếu không tự xoá —
+// không ảnh hưởng khối lượng tính toán, nhưng tích luỹ dung lượng/chi phí lưu
+// trữ theo thời gian không cần thiết (file chỉ cần tồn tại đủ lâu cho 1 lần
+// gọi messages.create, không cần giữ lại sau đó).
+async function xoaFileApi(fileId) {
+  try {
+    await fetchCoTimeout(`https://api.anthropic.com/v1/files/${fileId}`, {
+      method: "DELETE",
+      headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+    }, 15000);
+  } catch (e) { console.error("[Files API] Không xoá được file (không nghiêm trọng, chỉ tồn dư):", fileId, e.message); }
+}
+
 async function chuanBiContentBlocksChoClaude(contentBlocks) {
   const ketQua = [];
+  const fileIdsDaTao = [];
   for (const block of contentBlocks) {
     if (block.type === "document" && block.source?.type === "base64") {
       const rawSize = Math.round((block.source.data.length * 3) / 4);
       if (rawSize >= NGUONG_DUNG_LUONG_DUNG_FILES_API) {
         const fileId = await uploadPdfToFilesApi(block.source.data, block.source.filename);
+        fileIdsDaTao.push(fileId);
         ketQua.push({ type: "document", source: { type: "file", file_id: fileId } });
         continue;
       }
     }
     ketQua.push(block);
   }
-  return ketQua;
+  return { contentBlocks: ketQua, fileIdsDaTao };
 }
 
 async function callClaude(contentBlocks, betaHeader) {
   // Chuẩn bị TRƯỚC vòng retry — nếu phải upload Files API, chỉ upload 1 LẦN
   // (không upload lại mỗi lần retry request messages, tốn thời gian/tiền vô ích).
-  const contentBlocksThat = await chuanBiContentBlocksChoClaude(contentBlocks);
+  const { contentBlocks: contentBlocksThat, fileIdsDaTao } = await chuanBiContentBlocksChoClaude(contentBlocks);
   const headers = {
     "Content-Type": "application/json",
     "x-api-key": ANTHROPIC_API_KEY,
@@ -297,48 +315,55 @@ async function callClaude(contentBlocks, betaHeader) {
   // sẽ CHẮC CHẮN timeout y hệt — retry đủ 3 lần chỉ làm người dùng chờ vô ích
   // (90s×3=270s trước đây, nay 180s×3=540s). Lỗi mạng ngẫu nhiên khác (đứt kết
   // nối thoáng qua) vẫn đáng thử đủ 3 lần như cũ.
-  let loiCuoi;
-  for (let lan = 1; lan <= SO_LAN_TOI_DA; lan++) {
-    let resp;
-    try {
-      resp = await fetchCoTimeout("https://api.anthropic.com/v1/messages", { method: "POST", headers, body });
-    } catch (netErr) {
-      // Lỗi mạng thật (đứt kết nối, timeout) — tạm thời, đáng thử lại
-      loiCuoi = netErr;
-      const laTimeoutThat = netErr.status === 504;
-      const gioiHanLanNay = laTimeoutThat ? SO_LAN_TOI_DA_TIMEOUT : SO_LAN_TOI_DA;
-      if (lan < gioiHanLanNay) { await new Promise((r) => setTimeout(r, 1000 * lan)); continue; }
-      const err = new Error(laTimeoutThat
-        ? netErr.message // giữ nguyên thông báo timeout rõ ràng, không bọc thêm "sau N lần thử"
-        : `Không kết nối được tới Claude API sau ${SO_LAN_TOI_DA} lần thử: ${netErr.message}`);
-      err.status = laTimeoutThat ? 504 : 503;
+  try {
+    let loiCuoi;
+    for (let lan = 1; lan <= SO_LAN_TOI_DA; lan++) {
+      let resp;
+      try {
+        resp = await fetchCoTimeout("https://api.anthropic.com/v1/messages", { method: "POST", headers, body });
+      } catch (netErr) {
+        // Lỗi mạng thật (đứt kết nối, timeout) — tạm thời, đáng thử lại
+        loiCuoi = netErr;
+        const laTimeoutThat = netErr.status === 504;
+        const gioiHanLanNay = laTimeoutThat ? SO_LAN_TOI_DA_TIMEOUT : SO_LAN_TOI_DA;
+        if (lan < gioiHanLanNay) { await new Promise((r) => setTimeout(r, 1000 * lan)); continue; }
+        const err = new Error(laTimeoutThat
+          ? netErr.message // giữ nguyên thông báo timeout rõ ràng, không bọc thêm "sau N lần thử"
+          : `Không kết nối được tới Claude API sau ${SO_LAN_TOI_DA} lần thử: ${netErr.message}`);
+        err.status = laTimeoutThat ? 504 : 503;
+        throw err;
+      }
+
+      let data;
+      try {
+        data = await resp.json();
+      } catch (e) {
+        const err = new Error(`Máy chủ Claude trả về dữ liệu không hợp lệ (HTTP ${resp.status})`);
+        err.status = 502;
+        throw err;
+      }
+
+      if (resp.ok) return data;
+
+      if (MA_LOI_TAM_THOI.has(resp.status) && lan < SO_LAN_TOI_DA) {
+        // Lỗi tạm thời (quá tải/rate-limit phía Anthropic) — chờ rồi thử lại, không
+        // báo lỗi ngay cho người dùng.
+        await new Promise((r) => setTimeout(r, 1000 * lan));
+        continue;
+      }
+      // Lỗi chắc chắn sai (400/401/413...) hoặc đã hết lượt thử lại — báo lỗi ngay,
+      // không thử thêm vì thử lại cũng sẽ thất bại y hệt, chỉ tốn thêm tiền.
+      const err = new Error(data?.error?.message || `Lỗi HTTP ${resp.status} từ Claude API`);
+      err.status = resp.status;
       throw err;
     }
-
-    let data;
-    try {
-      data = await resp.json();
-    } catch (e) {
-      const err = new Error(`Máy chủ Claude trả về dữ liệu không hợp lệ (HTTP ${resp.status})`);
-      err.status = 502;
-      throw err;
-    }
-
-    if (resp.ok) return data;
-
-    if (MA_LOI_TAM_THOI.has(resp.status) && lan < SO_LAN_TOI_DA) {
-      // Lỗi tạm thời (quá tải/rate-limit phía Anthropic) — chờ rồi thử lại, không
-      // báo lỗi ngay cho người dùng.
-      await new Promise((r) => setTimeout(r, 1000 * lan));
-      continue;
-    }
-    // Lỗi chắc chắn sai (400/401/413...) hoặc đã hết lượt thử lại — báo lỗi ngay,
-    // không thử thêm vì thử lại cũng sẽ thất bại y hệt, chỉ tốn thêm tiền.
-    const err = new Error(data?.error?.message || `Lỗi HTTP ${resp.status} từ Claude API`);
-    err.status = resp.status;
-    throw err;
+    throw loiCuoi || new Error("Không gọi được Claude API.");
+  } finally {
+    // SỬA LỖI THẬT (claim #4 đã xác nhận): xoá file Files API NGAY SAU KHI
+    // dùng xong — dù thành công hay thất bại — tránh file tồn vĩnh viễn trên
+    // tài khoản Anthropic, tích luỹ dung lượng/chi phí không cần thiết.
+    for (const fid of fileIdsDaTao) xoaFileApi(fid); // không await — xoá "cố gắng hết sức", không chặn response trả về người dùng
   }
-  throw loiCuoi || new Error("Không gọi được Claude API.");
 }
 
 // ============================================================================
@@ -2330,8 +2355,16 @@ app.delete("/api/backup", batBuocDangNhap, async (req, res) => {
   }
 });
 
+// SỬA LỖI THẬT (phát hiện qua review độc lập, xác nhận bằng code — chưa từng
+// có header này trong bất kỳ phiên bản nào trước đó): thiếu "Cache-Control:
+// no-store" khiến Safari di động có thể cache cứng app.bundle.js — máy người
+// dùng dùng lại bản CŨ dù server đã deploy đúng bản mới và đã "tải lại trang"
+// bình thường (pull-to-refresh không đủ, cần hard refresh mới ép tải lại).
+// Đây là lời giải thích rất hợp lý cho nhiều lần báo "vẫn lỗi y hệt sau khi
+// deploy" trong quá trình phát triển — máy chưa từng thực sự nhận bản mới.
 app.get("/", (req, res) => {
   const file = path.join(__dirname, "index.html");
+  res.set("Cache-Control", "no-store");
   if (fs.existsSync(file)) return res.sendFile(file);
   res.status(404).send("Chưa có index.html — tải index.html + app.bundle.js lên GitHub cùng chỗ với server.js.");
 });
@@ -2339,6 +2372,7 @@ app.get("/app.bundle.js", (req, res) => {
   const plain = path.join(__dirname, "app.bundle.js");
   const gz = path.join(__dirname, "app.bundle.js.gz");
   res.type("application/javascript");
+  res.set("Cache-Control", "no-store");
   // Ưu tiên file thường (chạy được trên mọi trình duyệt, kể cả điện thoại)
   if (fs.existsSync(plain)) return res.sendFile(plain);
   if (fs.existsSync(gz)) {
