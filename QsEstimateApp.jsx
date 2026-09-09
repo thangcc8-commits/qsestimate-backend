@@ -1584,20 +1584,25 @@ export default function QsEstimateApp() {
   };
 
   const analyzePdfAI = async (pdfEntry, ghiChuThem) => {
-    // Trần THẬT của Anthropic API là 32MB cho TOÀN BỘ dữ liệu request — nhưng dữ
-    // liệu phải mã hoá base64 trước khi gửi, làm phình to thêm ~33%. Giới hạn file
-    // GỐC dưới đây đã tính trừ hao phần phình đó + chừa dư cho phần JSON/prompt,
-    // để không bao giờ vượt trần thật (nguồn: platform.claude.com/docs — Vision).
-    const HARD_MAX = 22 * 1024 * 1024;
+    // SỬA LỖI THẬT (chẩn đoán từ triệu chứng người dùng: "A7-14.pdf" 45.4MB/12
+    // trang bị CHẶN THẲNG ở đây trước khi kịp gửi lên server): trước đây coi cả
+    // file là 1 lần gửi duy nhất phải vừa trần 32MB base64 của API — đúng với
+    // hành vi CŨ, nhưng giờ server đã tự chia PDF theo DUNG LƯỢNG từng phần
+    // (xem chiaPdfLonNeuCanThiet/server.js — đệ quy chia đôi tới khi mỗi phần
+    // đủ nhỏ), y hệt cách đã làm cho PDF nhiều trang từ trước. Chặn cứng ở đây
+    // giờ chặn NHẦM cả những file server hoàn toàn xử lý được. Chỉ còn chặn ở
+    // mức thật vô lý (file lỗi/sai định dạng) — server sẽ tự báo lỗi rõ ràng
+    // nếu có 1 TRANG ĐƠN LẺ vẫn vượt trần dù đã chia tới mức nhỏ nhất.
+    const HARD_MAX = 80 * 1024 * 1024; // khớp với giới hạn body 110mb phía server (base64 hoá phình ~33%)
     const SOFT_MAX = 10 * 1024 * 1024; // trên mức này chỉ cảnh báo, vẫn cho gửi bình thường
     if (pdfEntry.size > HARD_MAX) {
-      const msg = `File "${pdfEntry.name}" nặng ${(pdfEntry.size / 1e6).toFixed(1)} MB — vượt giới hạn 22MB. Đây là trần THẬT của chính API AI (32MB dữ liệu đã mã hoá), không phải app tự đặt ra — không có cách nào gửi file nặng hơn dù trả thêm tiền. Cách xử lý: (1) tách PDF thành các phần nhỏ hơn (mỗi phần vài trang), đọc từng phần rồi gộp kết quả; hoặc (2) giảm chất lượng quét/DPI khi xuất PDF — file nặng hơn do quét độ phân giải quá cao KHÔNG giúp AI đọc chính xác hơn, vì hệ thống tự chuẩn hoá ảnh về độ phân giải chuẩn trước khi đọc bất kể file gốc nặng nhẹ.`;
+      const msg = `File "${pdfEntry.name}" nặng ${(pdfEntry.size / 1e6).toFixed(1)} MB — quá lớn bất thường cho 1 bản vẽ PDF, khả năng cao file bị lỗi/sai định dạng khi xuất. Kiểm tra lại file gốc.`;
       setAiError(msg);
       showToast(msg, "error");
       return;
     }
     if (pdfEntry.size > SOFT_MAX) {
-      showToast(`File nặng ${(pdfEntry.size / 1e6).toFixed(1)} MB — AI có thể mất lâu hơn bình thường để đọc hết, chờ chút nhé. Nếu lỗi mạng giữa chừng, thử nén nhỏ lại hoặc tách bớt trang rồi gửi lại.`, "warn");
+      showToast(`File nặng ${(pdfEntry.size / 1e6).toFixed(1)} MB — server sẽ tự chia nhỏ theo dung lượng để đọc, có thể mất lâu hơn bình thường. Nếu lỗi mạng giữa chừng, cứ thử lại — đã có xử lý nền + timeout tự động.`, "warn");
     }
     setPdfAiAnalyzing(pdfEntry.id);
     setAiError(null);
@@ -1627,14 +1632,20 @@ export default function QsEstimateApp() {
         // ---- Chế độ backend riêng (ổn định — dùng khi đã có hosting) ----
         let response;
         try {
-          // Timeout 30s — giờ endpoint này CHỈ tạo job rồi trả về ngay (không
-          // còn chờ AI xử lý xong mới trả lời), nên phải rất nhanh; treo lâu
-          // hơn 30s gần như chắc chắn là mạng rớt, không phải đang xử lý.
+          // SỬA: 30s cố định SAI cho file lớn — request này giờ vẫn phải tải
+          // LÊN toàn bộ base64 (có thể ~100MB cho file gốc 80MB) trước khi
+          // server kịp tạo job, bất kể server xử lý AI nhanh hay chậm. Trên
+          // mạng di động chậm, riêng việc TẢI LÊN đã có thể mất vài phút — cố
+          // định 30s sẽ tự huỷ nhầm ngay giữa lúc đang tải lên bình thường.
+          // Ước lượng theo dung lượng thật: tối thiểu 30s, cộng thêm cho mỗi
+          // MB base64 (giả định tốc độ mạng di động chậm ~1MB/s là hợp lý để
+          // không huỷ nhầm, vẫn có trần trên để không chờ vô hạn nếu treo thật).
+          const timeoutTaiLen = Math.min(300000, Math.max(30000, Math.ceil((base64.length / 1e6) * 1000) + 20000));
           response = await fetchCoTimeout(`${BACKEND_URL}/api/analyze-pdf`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-user-id": getUserId(), ...authHeaders() },
             body: JSON.stringify({ base64, ghiChuThem, name: pdfEntry.name, danhSachChuan: mauChuanPdf.danhSach, tenCam: activeProject?.tenCam, tenUuTien: activeProject?.tenUuTien, duToanMauThamChieu: layDuToanMauThamChieu(activeProject) }),
-          }, 30000);
+          }, timeoutTaiLen);
         } catch (netErr) {
           throw new Error(`Không gọi được backend riêng (${netErr.message}). Kiểm tra lại địa chỉ BACKEND_URL trong code và server có đang chạy không.`);
         }
@@ -6208,18 +6219,24 @@ function ExportHubTab({ boqLines, totals, hasData, activeProject, exportExcel, e
     { id: "excel", label: "Xuất Excel", icon: FileSpreadsheet },
   ];
 
-  // Cổng "Xuất bản CHÍNH THỨC" — chặn CỨNG nếu còn: dòng Review (giá 0đ/định mức
-  // tự tạo), dòng dùng giá MƯỢN từ nhóm khác (chưa duyệt giá thật cho đúng nhóm
-  // công trình này), hoặc dự án trống. "Xuất bản NHÁP" vẫn luôn dùng được không
-  // giới hạn — QS cần xem/kiểm tra nội bộ trước khi mọi thứ sẵn sàng.
+  // Cổng "Xuất bản CHÍNH THỨC" — CHỈ còn chặn CỨNG nếu còn dòng "QC_MISSING"
+  // (định mức TỰ TẠO khi duyệt hàng loạt — cả TÊN lẫn GIÁ đều chưa xác nhận,
+  // rủi ro khác hẳn "chỉ thiếu giá": tên có thể sai/không tồn tại thật) hoặc
+  // dự án trống. "Giá mượn" và "giá 0đ" (PRICE_MISSING) KHÔNG còn chặn — theo
+  // yêu cầu rõ ràng: tự động mượn/tính rồi cho xuất luôn, KS QS sẽ rà soát lại
+  // 100% sau khi xuất, không cần nhập tay trước mới được xuất. "Xuất bản
+  // NHÁP" vẫn luôn dùng được không giới hạn.
   const soQcMissing = boqLines.filter((l) => l.calc?.trangThai === "QC_MISSING").length;
   const soPriceMissing = boqLines.filter((l) => l.calc?.trangThai === "PRICE_MISSING").length;
   const soReview = soQcMissing + soPriceMissing; // gộp lại để tương thích chỗ khác đang dùng "chưa sẵn sàng"
   const soGiaMuon = boqLines.filter((l) => l.calc?.coGiaMuon).length;
   const lyDoChuaSanSang = [];
   if (soQcMissing > 0) lyDoChuaSanSang.push(`${soQcMissing} dòng "QC MISSING" — định mức tự tạo khi duyệt hàng loạt, CHƯA qua kiểm tra kỹ thuật (tên lẫn giá đều chưa xác nhận)`);
-  if (soPriceMissing > 0) lyDoChuaSanSang.push(`${soPriceMissing} dòng "PRICE MISSING" — định mức/tên đã đúng nhưng giá cuối = 0đ`);
-  if (soGiaMuon > 0) lyDoChuaSanSang.push(`${soGiaMuon} dòng đang dùng giá MƯỢN từ nhóm công trình khác — chưa có giá duyệt riêng cho nhóm này`);
+  // Vẫn hiện CẢNH BÁO (không chặn) để KS QS biết chỗ cần rà soát kỹ hơn khi
+  // duyệt lại — chỉ khác là không còn khoá nút xuất vì lý do này nữa.
+  const canhBaoKhongChan = [];
+  if (soPriceMissing > 0) canhBaoKhongChan.push(`${soPriceMissing} dòng "PRICE MISSING" — định mức/tên đã đúng nhưng giá cuối = 0đ, cần KS QS bổ sung giá khi rà soát`);
+  if (soGiaMuon > 0) canhBaoKhongChan.push(`${soGiaMuon} dòng đang dùng giá MƯỢN từ nhóm công trình khác — cần KS QS xác nhận giá này hợp lý khi rà soát`);
   const chuaSanSangXuatChinhThuc = lyDoChuaSanSang.length > 0 || soHienThi === 0;
 
   return (
@@ -6233,6 +6250,15 @@ function ExportHubTab({ boqLines, totals, hasData, activeProject, exportExcel, e
             {lyDoChuaSanSang.map((l, i) => <li key={i}>{l}</li>)}
           </ul>
           <div className="text-xs mt-1" style={{ color: SLATE }}>Vẫn xuất được bản NHÁP để kiểm tra nội bộ (nút riêng bên dưới) — nhưng nút "Xuất bản CHÍNH THỨC" bị khoá tới khi xử lý hết các dòng trên.</div>
+        </div>
+      )}
+
+      {canhBaoKhongChan.length > 0 && soHienThi > 0 && (
+        <div className="mb-4 p-3 rounded border" style={{ borderColor: AMBER, background: "#FFF3CD" }}>
+          <div className="text-sm font-semibold mb-1" style={{ color: "#8A6300" }}>⚠️ Vẫn xuất được bản CHÍNH THỨC, nhưng cần KS QS rà soát kỹ các dòng sau trước khi gửi đi:</div>
+          <ul className="text-xs list-disc pl-4" style={{ color: INK }}>
+            {canhBaoKhongChan.map((l, i) => <li key={i}>{l}</li>)}
+          </ul>
         </div>
       )}
 
