@@ -38,6 +38,18 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const app = express();
+// SỬA LỖI NGHIÊM TRỌNG THẬT (phát hiện qua đọc trực tiếp log Render từ video
+// màn hình người dùng gửi — không phải suy đoán): thiếu "trust proxy" khiến
+// express-rate-limit THROW ValidationError chưa được bắt (uncaught) trên MỖI
+// request đi qua proxy của Render — làm CRASH TOÀN BỘ TIẾN TRÌNH NODE.JS giữa
+// chừng xử lý request. Render tự khởi động lại server (đã xác nhận qua dòng
+// log "Detected service running on port..." xuất hiện ngay sau 2 lần lỗi này
+// trong video), nhưng request đang chờ của người dùng KHÔNG BAO GIỜ nhận được
+// phản hồi — đây rất có thể là nguyên nhân gốc rễ thật sự của triệu chứng
+// "treo, không ra kết quả, không báo lỗi gì" đã lặp lại nhiều lần. Đặt = 1
+// (tin đúng 1 lớp proxy, khớp cấu trúc mạng của Render) — KHÔNG dùng `true`,
+// vì điều đó cho phép client tự giả mạo X-Forwarded-For để né rate-limit.
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3001;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Model đọc từ biến môi trường — không khoá cứng trong code (mục 23 đặc tả: không
