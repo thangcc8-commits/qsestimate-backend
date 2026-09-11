@@ -1325,18 +1325,32 @@ function danhGiaBieuThucToanHoc(expr) {
   const tokens = sanitized.match(/(\d+(?:\.\d+)?|[+\-*/()])/g);
   if (!tokens) return null;
   let pos = 0;
+  // SỬA LỖI THẬT (audit phát hiện qua test trực tiếp — bằng chứng chạy Node
+  // thật, không chỉ đọc code): JS tự ép null thành 0 trong phép cộng/trừ
+  // (1 + null === 1) và unary trừ của null ra -0 (-null === -0) — thiếu kiểm
+  // tra null tường minh khiến biểu thức HỎNG CÚ PHÁP (VD "1+" thiếu toán
+  // hạng, do AI trả về bị cắt cụt) lặng lẽ ra 1 con số "hợp lý" thay vì bị
+  // từ chối. Đây là quy hồi của đúng lỗi đã tìm+sửa ở audit trước — bản này
+  // vô tình quay lại code cũ. Giờ MỌI điểm nhận giá trị con đều kiểm tra null
+  // tường minh, trả null ngay lập tức thay vì để lọt vào phép toán.
   function parseExpression() {
     let val = parseTerm();
+    if (val === null) return null;
     while (pos < tokens.length && (tokens[pos] === "+" || tokens[pos] === "-")) {
-      const op = tokens[pos++]; const nextVal = parseTerm();
+      const op = tokens[pos++];
+      const nextVal = parseTerm();
+      if (nextVal === null) return null;
       val = op === "+" ? val + nextVal : val - nextVal;
     }
     return val;
   }
   function parseTerm() {
     let val = parseFactor();
+    if (val === null) return null;
     while (pos < tokens.length && (tokens[pos] === "*" || tokens[pos] === "/")) {
-      const op = tokens[pos++]; const nextVal = parseFactor();
+      const op = tokens[pos++];
+      const nextVal = parseFactor();
+      if (nextVal === null) return null;
       if (op === "/" && nextVal === 0) return null;
       val = op === "*" ? val * nextVal : val / nextVal;
     }
@@ -1345,8 +1359,8 @@ function danhGiaBieuThucToanHoc(expr) {
   function parseFactor() {
     if (pos >= tokens.length) return null;
     const token = tokens[pos++];
-    if (token === "(") { const val = parseExpression(); if (pos >= tokens.length || tokens[pos++] !== ")") return null; return val; }
-    if (token === "-") return -parseFactor();
+    if (token === "(") { const val = parseExpression(); if (val === null) return null; if (pos >= tokens.length || tokens[pos++] !== ")") return null; return val; }
+    if (token === "-") { const val = parseFactor(); return val === null ? null : -val; }
     if (token === "+") return parseFactor();
     const num = Number(token);
     return Number.isFinite(num) ? num : null;
