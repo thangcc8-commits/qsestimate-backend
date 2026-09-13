@@ -228,11 +228,11 @@ const MA_LOI_TAM_THOI = new Set([429, 500, 502, 503, 504]);
 // sự 3-5 PHÚT để đọc xong loại bản vẽ này. Khi server tự bỏ cuộc ở 180s,
 // Anthropic VẪN TIẾP TỤC xử lý và TÍNH TIỀN request đó (đã gửi = đã tính),
 // dù không còn ai chờ nhận kết quả — mất tiền thật, 0 kết quả, và với retry
-// 2 lần thì mất tiền tới 2 lần liền cho cùng 1 lượt bấm. Tăng lên 480s (8
-// phút) — đủ dư so với quan sát thật 3-5 phút, để server THẬT SỰ CHỜ ĐƯỢC
+// 2 lần thì mất tiền tới 2 lần liền cho cùng 1 lượt bấm. Tăng lên 1200s (20
+// phút) — dư dả so với quan sát thật 3-5 phút, để server THẬT SỰ CHỜ ĐƯỢC
 // tới khi Anthropic trả lời, thay vì tự cắt ngang 1 request đằng nào cũng
 // phải trả tiền.
-const AI_TIMEOUT_MS = 480_000; // 180s -> 480s (8 phút): 180s ngắn hơn thời gian xử lý thật của bản vẽ phức tạp, gây bỏ cuộc sớm + mất tiền vô ích
+const AI_TIMEOUT_MS = 1_200_000; // 180s -> 1200s (20 phút)
 // (PDF 50-89 trang, dưới ngưỡng chia job 90 trang nên gọi 1 lần duy nhất, cần
 // nhiều thời gian hơn 90s để Claude đọc hết + sinh danh sách BOQ dài) — lỗi
 // đúng là do AbortController CỦA APP tự ngắt ở 90s, không phải Render cắt.
@@ -328,7 +328,21 @@ async function callClaude(contentBlocks, betaHeader) {
     "anthropic-version": "2023-06-01",
   };
   if (betaHeader) headers["anthropic-beta"] = betaHeader;
-  const body = JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 16000, messages: [{ role: "user", content: contentBlocksThat }] });
+  // SỬA LỖI THẬT (khoảng cách độ chính xác so với khung chat Claude thường):
+  // trước đây KHÔNG hề bật "thinking" (suy luận sâu) — qua API thô, nếu không
+  // bật thinking, Claude trả lời NGAY LẬP TỨC không qua bước suy luận riêng,
+  // dễ bỏ sót/nhầm khi bản vẽ phức tạp nhiều hạng mục. Trong khung chat này,
+  // Claude tự nhiên suy luận kỹ trước khi trả lời — đây là khác biệt hành vi
+  // thật, không phải "khung chat giỏi hơn app". Bật thinking với budget thật
+  // (10000 token suy luận), temperature=1 (BẮT BUỘC theo tài liệu chính thức
+  // khi bật thinking, request sẽ bị từ chối nếu để giá trị khác). Tăng
+  // max_tokens lên 32000 để đủ chỗ cho cả token suy luận LẪN toàn bộ JSON kết
+  // quả (thinking tokens tính vào chung max_tokens, không phải khoản riêng).
+  const body = JSON.stringify({
+    model: ANTHROPIC_MODEL, max_tokens: 32000, temperature: 1,
+    thinking: { type: "enabled", budget_tokens: 10000 },
+    messages: [{ role: "user", content: contentBlocksThat }],
+  });
 
   const SO_LAN_TOI_DA = 3; // 1 lần gốc + tối đa 2 lần thử lại (lỗi mạng thật)
   const SO_LAN_TOI_DA_TIMEOUT = 2; // 1 lần gốc + 1 lần thử lại — SỬA LỖI THẬT
@@ -1769,7 +1783,7 @@ function kiemTraAnhBase64(base64, mediaType) {
   };
 }
 
-async function handleAnalyzeImage(req, res) {
+app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
     const { base64: rawB64, mediaType: rawMt, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!rawB64) return res.status(400).json({ error: "Thiếu base64" });
@@ -1800,8 +1814,7 @@ async function handleAnalyzeImage(req, res) {
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
-}
-app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, handleAnalyzeImage);
+});
 
 // ============================================================================
 // POST /api/analyze-images-batch   body: { images:[{base64,mediaType,name}], ghiChuThem, danhSachChuan }
@@ -1948,26 +1961,32 @@ function fileJob(jobId) {
   return path.join(DATA_DIR_JOBS, `${safe}.json`);
 }
 async function docJob(jobId) {
-  // Postgres JSONB trả object; bản cũ từng double-stringify nên còn string — hỗ trợ cả hai.
+  // SỬA LỖI THẬT (nguyên nhân xác nhận của lỗi "Job not found" người dùng gặp):
+  // trước đây CHỈ lưu file JSON trên đĩa (data/jobs/) — Render free tier có
+  // filesystem TẠM THỜI, bị xoá sạch mỗi khi server khởi động lại (redeploy,
+  // hết RAM, hoặc tự restart định kỳ) — 1 job PDF lớn xử lý nhiều phút hoàn
+  // toàn có thể bị mất giữa chừng nếu server restart đúng lúc đó. Giờ dùng
+  // Postgres (bền vững, không mất khi restart) nếu đã cấu hình DATABASE_URL;
+  // vẫn fallback về file JSON nếu chưa có Postgres (không đổi hành vi cũ).
+  // SỬA LỖI THẬT: pgStore.ghiStorage() đã tự JSON.stringify() bên trong nó —
+  // gọi thêm 1 lần nữa ở đây trước đó khiến JSONB lưu 1 CHUỖI chứa JSON thay
+  // vì lưu thẳng object (double-encode). Đọc ra vẫn đúng NẾU ghi/đọc luôn nhất
+  // quán, nhưng dễ vỡ nếu có nơi khác từng ghi đúng cách (object thuần) — nay
+  // xử lý được cả 2 dạng để không mất dữ liệu cũ.
   if (pgStore && process.env.DATABASE_URL) {
     try {
       const res = await pgStore.docStorage("_jobs", jobId);
-      if (res == null) { /* fallback file */ }
-      else if (typeof res === "string") {
-        try { return JSON.parse(res); } catch (e) { return null; }
-      } else if (typeof res === "object") {
-        return res;
-      }
+      if (res == null) { /* rơi xuống fallback file bên dưới */ }
+      else if (typeof res === "string") { try { return JSON.parse(res); } catch (e) { return null; } }
+      else if (typeof res === "object") { return res; }
     } catch (e) { console.error("[Job] lỗi đọc Postgres, fallback file:", e.message); }
   }
   try { return JSON.parse(fs.readFileSync(fileJob(jobId), "utf8")); } catch (e) { return null; }
 }
 async function ghiJob(job) {
-  // Lưu object thuần — storage-postgres ghi JSONB đúng 1 lần (không stringify 2 lớp).
-  // Bản ghi file vẫn JSON.stringify một lần.
   if (pgStore && process.env.DATABASE_URL) {
     try {
-      await pgStore.ghiStorage("_jobs", job.jobId, job);
+      await pgStore.ghiStorage("_jobs", job.jobId, job); // object thuần — ghiStorage tự stringify đúng 1 lần
       return;
     } catch (e) { console.error("[Job] lỗi ghi Postgres, fallback file:", e.message); }
   }
@@ -2092,7 +2111,9 @@ app.get("/api/jobs/:jobId/status", batBuocDangNhap, async (req, res) => {
   const soLoXong = job.cacLo.filter((l) => l.trangThai === "xong").length;
   const soLoLoi = job.cacLo.filter((l) => l.trangThai === "loi").length;
   const soLoDangChay = job.cacLo.filter((l) => l.trangThai === "dang_chay").length;
-  // dang_chay tính 50% lô — UI không đứng 0% / 90% giả trong lúc Claude đang đọc
+  // Tính lô đang chạy = 50% tiến độ — tránh UI đứng yên 0%/95% giả trong lúc
+  // Claude thực sự đang đọc (timeout mới 20 phút/lần, đứng yên lâu dễ gây
+  // hiểu lầm là treo/hỏng dù server vẫn đang xử lý bình thường).
   const phanTramXong = Math.min(99, Math.round(((soLoXong + soLoLoi + soLoDangChay * 0.5) / Math.max(1, job.tongSoLo)) * 100));
   res.json({
     jobId: job.jobId, trangThaiTong: job.trangThaiTong, tongSoLo: job.tongSoLo,
@@ -2174,55 +2195,28 @@ async function chiaPdfLonNeuCanThiet(base64) {
 async function xuLyJobPdfLon(jobId) {
   const job = await docJob(jobId);
   if (!job) return;
-  const SO_LAN_THU_LO = 2;
+  const SO_LAN_THU_LO = 2; // đồng bộ với xuLyJobNen — xem giải thích ở đó
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
     if (lo.trangThai === "xong") continue;
     lo.trangThai = "dang_chay";
-    // Không ghi full base64 mỗi lần cập nhật trạng thái "đang chạy" nếu có thể — vẫn cần 1 lần để status API thấy dang_chay
     await ghiJob(job);
 
     let thanhCong = false, loiLanCuoi = "";
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
       try {
-        if (!lo.pdfBase64) throw new Error("Thiếu pdfBase64 của lô (đã bị xoá sau xử lý hoặc job hỏng) — tải lại file PDF.");
-        // File > ~3MB base64: ưu tiên Files API (né trần 32MB payload + ổn định hơn)
-        const uocByte = Math.floor((lo.pdfBase64.length * 3) / 4);
-        let contentBlocks;
-        let betaHeader = "pdfs-2024-09-25";
-        if (uocByte > 3 * 1024 * 1024 && typeof uploadPdfToFilesApi === "function" && ANTHROPIC_API_KEY) {
-          try {
-            const fileId = await uploadPdfToFilesApi(lo.pdfBase64, `${job.tenFile || "part"}_${i + 1}.pdf`);
-            const fid = typeof fileId === "string" ? fileId : (fileId?.id || fileId?.file_id);
-            if (!fid) throw new Error("Files API không trả file_id");
-            contentBlocks = [
-              { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
-              { type: "document", source: { type: "file", file_id: fid } },
-              { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
-            ];
-            betaHeader = "pdfs-2024-09-25,files-api-2025-04-14";
-          } catch (upErr) {
-            console.warn("[Job PDF] Files API thất bại, fallback base64:", upErr.message);
-            contentBlocks = null;
-          }
-        }
-        if (!contentBlocks) {
-          contentBlocks = [
-            { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
-            { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
-          ];
-        }
-        const data = await callUnifiedAI(contentBlocks, betaHeader, job.provider);
+        const contentBlocks = [
+          { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
+          { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
+        ];
+        const data = await callUnifiedAI(contentBlocks, "pdfs-2024-09-25", job.provider);
         const rawItems = parseRawJsonTuAI(data);
         const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ name: `${job.tenFile || "document.pdf"} (trang ${lo.tuTrang}-${lo.denTrang})` }]);
         lo.items = items;
         lo.pipelineTrace = pipelineTrace;
         lo.drawingModel = drawingModel;
         lo.trangThai = "xong";
-        // GỐC RỄ treo file lớn: mỗi ghiJob serialize lại toàn bộ base64 PDF → RAM/disk/Postgres phình to.
-        // Sau khi lô xong (hoặc lỗi hết retry) XOÁ base64 khỏi job — không cần để lấy result.
-        delete lo.pdfBase64;
         thanhCong = true;
         const chiPhi = tinhChiPhi(data.usage, undefined, job.provider || AI_PROVIDER);
         lo.chiPhi = chiPhi;
@@ -2236,17 +2230,28 @@ async function xuLyJobPdfLon(jobId) {
     if (!thanhCong) {
       lo.trangThai = "loi";
       lo.loi = loiLanCuoi;
-      delete lo.pdfBase64; // vẫn giải phóng dù lỗi
+      // Lỗi/timeout vẫn có thể đã bị Anthropic tính tiền (đã gửi = đã tính,
+      // không hoàn được) — ghi lại để không mất dấu vết chi phí thật, dù
+      // không biết chính xác số tiền (không nhận được "usage" khi lỗi).
+      ghiNhatKy({ luc: new Date().toISOString(), nguoi: job.nguoi, loai: `Job PDF phần ${i + 1}/${job.cacLo.length} — LỖI/TIMEOUT (không tính được chi phí chính xác, xem Usage thật ở platform.claude.com)`, ten: job.jobId, inputTokens: 0, outputTokens: 0, usd: 0, vnd: 0 });
     }
+    // SỬA LỖI THẬT (gốc rễ treo/chậm với file lớn nhiều lô): mỗi lần ghiJob()
+    // serialize LẠI TOÀN BỘ object job — nếu vẫn giữ base64 của các lô ĐÃ XONG,
+    // mỗi lần ghi tiến độ cho lô SAU phải cõng theo base64 của mọi lô TRƯỚC đó
+    // (không cần nữa, vì kết quả đã trích vào lo.items) — RAM/đĩa/Postgres phình
+    // to dần theo cấp số nhân với file càng nhiều lô. Xoá ngay sau khi lô này
+    // xong (dù thành công hay lỗi) — không bao giờ cần đọc lại base64 đó nữa.
+    delete lo.pdfBase64;
     await ghiJob(job);
   }
-  job.trangThaiTong = job.cacLo.every((l) => l.trangThai === "xong") ? "xong" : "co_loi";
-  // Dọn mọi base64 còn sót
+  // Dọn mọi base64 còn sót (phòng trường hợp job được resume sau restart, có
+  // lô đã "xong" từ trước bị vòng lặp bỏ qua nhưng vẫn còn giữ base64 cũ).
   (job.cacLo || []).forEach((l) => { delete l.pdfBase64; });
+  job.trangThaiTong = job.cacLo.every((l) => l.trangThai === "xong") ? "xong" : "co_loi";
   await ghiJob(job);
 }
 
-async function handleAnalyzePdf(req, res) {
+app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
   try {
     const { base64, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Thiếu base64" });
@@ -2290,69 +2295,10 @@ async function handleAnalyzePdf(req, res) {
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
-}
-app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, handleAnalyzePdf);
-
-// ============================================================================
-// UPLOAD NHỊ PHÂN CHO FILE LỚN — ghép từ ý tưởng V1.7 (ChatGPT), CHỈ LẤY phần
-// đường truyền (browser gửi thẳng byte thô, không phải tự mã hoá base64 rồi
-// nhét vào JSON trước — bước base64-hoá-ở-trình-duyệt làm phình ~33% dữ liệu
-// VÀ giữ thêm 1 bản sao trong RAM trình duyệt, dễ góp phần vào cảm giác "treo"
-// trên máy yếu/di động). KHÔNG lấy phần còn lại của V1.7 (bản đó bỏ hẳn Engine,
-// để AI tự khai "qty" — vi phạm đúng nguyên tắc cốt lõi "AI không tự quyết định
-// khối lượng"). 2 bước:
-//   1) POST /api/analyze-file/init  (JSON, nhỏ) — gửi TRƯỚC mọi thứ ngoài file
-//      (ghiChuThem, danhSachChuan, mẫu tham chiếu...) — trả về uploadId ngắn hạn.
-//   2) POST /api/analyze-file/:uploadId  (binary thô) — CHỈ gửi byte file, ghép
-//      với dữ liệu đã gửi ở bước 1, rồi giao thẳng cho handleAnalyzeImage/
-//      handleAnalyzePdf — TỪ ĐÂY TRỞ ĐI ĐI ĐÚNG con đường an toàn cũ (Engine,
-//      pipeline 9 bước, job nền cho PDF lớn) không khác gì đường base64-JSON.
-// Lý do tách 2 bước thay vì nhét hết vào header: "duToanMauThamChieu" (mẫu dự
-// toán dán nguyên văn) có thể dài hàng chục KB — vượt xa giới hạn kích thước
-// header thông thường (~8KB) của Express/trình duyệt/proxy nếu nhét vào header.
-const choUploadNhiPhan = new Map(); // uploadId -> { metadata, taoLuc }
-const UPLOAD_NHI_PHAN_HET_HAN_MS = 10 * 60 * 1000; // 10 phút — đủ để browser gửi tiếp bước 2 kể cả mạng chậm, dọn tự động tránh rò rỉ RAM nếu bước 2 không bao giờ tới
-
-function donDepUploadNhiPhanHetHan() {
-  const now = Date.now();
-  for (const [id, v] of choUploadNhiPhan) {
-    if (now - v.taoLuc > UPLOAD_NHI_PHAN_HET_HAN_MS) choUploadNhiPhan.delete(id);
-  }
-}
-
-app.post("/api/analyze-file/init", aiLimiter, batBuocDangNhap, (req, res) => {
-  donDepUploadNhiPhanHetHan();
-  const { ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu, name, mediaType, isPdf } = req.body || {};
-  const uploadId = uidBackend("upl");
-  choUploadNhiPhan.set(uploadId, {
-    taoLuc: Date.now(),
-    metadata: { ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu, name, mediaType, isPdf: !!isPdf },
-  });
-  res.json({ uploadId });
 });
 
-app.post(
-  "/api/analyze-file/:uploadId",
-  aiLimiter,
-  batBuocDangNhap,
-  express.raw({ type: "application/octet-stream", limit: "110mb" }), // khớp trần chung đã đặt cho express.json ở trên — file gốc tới ~80MB vẫn lọt
-  async (req, res) => {
-    const phien = choUploadNhiPhan.get(req.params.uploadId);
-    if (!phien) return res.status(400).json({ error: "uploadId không tồn tại hoặc đã hết hạn (quá 10 phút chưa gửi file) — gọi lại /init trước." });
-    choUploadNhiPhan.delete(req.params.uploadId); // dùng 1 lần, xoá ngay tránh dùng lại/rò rỉ
-    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-      return res.status(400).json({ error: "File rỗng hoặc chưa gửi dạng nhị phân đúng (Content-Type phải là application/octet-stream)." });
-    }
-    const base64 = req.body.toString("base64");
-    const { isPdf, mediaType, name, ...meta } = phien.metadata;
-    // Ghép lại ĐÚNG hình dạng req.body mà handleAnalyzeImage/handleAnalyzePdf đã
-    // quen nhận — tái dùng 100% logic Engine/pipeline hiện có, không viết lại.
-    req.body = isPdf ? { base64, name, ...meta } : { base64, mediaType, name, ...meta };
-    return isPdf ? handleAnalyzePdf(req, res) : handleAnalyzeImage(req, res);
-  }
-);
-
-
+// ============================================================================
+// LƯU TRỮ RIÊNG — thay cho window.storage / localStorage, lưu thật trên server
 // theo từng người dùng. ƯU TIÊN nhận diện qua MÃ ĐĂNG NHẬP (x-access-code) khi
 // công ty đã bật phân quyền (CO_PHAN_QUYEN) — vì mã này chú TỰ GÕ, ổn định qua
 // mọi trình duyệt/thiết bị, không bị mất khi trình duyệt xoá bộ nhớ tạm. Chỉ khi
