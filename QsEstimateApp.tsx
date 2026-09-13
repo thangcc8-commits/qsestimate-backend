@@ -1668,7 +1668,7 @@ export default function QsEstimateApp() {
           const jobId = data.jobId;
           let trangThaiTong = "dang_chay";
           let soVongCho = 0;
-          while (trangThaiTong === "dang_chay" && soVongCho < 200) { // tối đa ~200×3s = 10 phút chờ
+          while (trangThaiTong === "dang_chay" && soVongCho < 1200) { // tối đa ~1200×3s = 60 phút chờ — đủ dư so với trần thật phía server (2 lần thử x 20 phút = tối đa 40 phút/lô), chừa ~20 phút đệm
             await new Promise((r) => setTimeout(r, 3000));
             soVongCho++;
             let resStatus;
@@ -1688,7 +1688,7 @@ export default function QsEstimateApp() {
             setAiProgress(Math.min(95, dataStatus.phanTramXong || 0));
             setLastRawDebug(`PDF lớn — đang xử lý nền: ${dataStatus.soLoXong}/${dataStatus.tongSoLo} phần xong (${dataStatus.phanTramXong}%)${dataStatus.soLoLoi ? `, ${dataStatus.soLoLoi} phần lỗi` : ""}.`);
           }
-          if (trangThaiTong === "dang_chay") throw new Error("PDF lớn xử lý quá lâu (>10 phút) — có thể server đang quá tải, thử lại sau.");
+          if (trangThaiTong === "dang_chay") throw new Error("PDF lớn xử lý quá lâu (>60 phút) — có thể server đang quá tải, thử lại sau.");
           const resResult = await fetchCoTimeout(`${BACKEND_URL}/api/jobs/${jobId}/result`, { headers: { "x-user-id": getUserId(), ...authHeaders() } }, 20000);
           const dataResult = await resResult.json().catch(() => null);
           if (!resResult.ok || !dataResult) throw new Error(dataResult?.error || "Không lấy được kết quả job PDF lớn.");

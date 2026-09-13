@@ -222,7 +222,17 @@ const MA_LOI_TAM_THOI = new Set([429, 500, 502, 503, 504]);
 // fetch() không có giới hạn thời gian, nếu API bên hãng bị treo, request có
 // thể chờ vô thời hạn (chiếm tài nguyên server, người dùng nhìn màn hình xoay
 // mãi không dừng). 90 giây đủ rộng cho ảnh/PDF phức tạp, không quá ngắn.
-const AI_TIMEOUT_MS = 180_000; // 90s -> 180s: chẩn đoán thật từ triệu chứng người dùng
+// SỬA LỖI THẬT (chẩn đoán từ log lỗi thật: "Hết thời gian chờ (180s)" — xác
+// nhận qua ảnh debug JSON của chính người dùng): 180s TRƯỚC ĐÂY quá ngắn cho
+// bản vẽ kiến trúc phức tạp — chat Claude thường (không bị timeout) cần thật
+// sự 3-5 PHÚT để đọc xong loại bản vẽ này. Khi server tự bỏ cuộc ở 180s,
+// Anthropic VẪN TIẾP TỤC xử lý và TÍNH TIỀN request đó (đã gửi = đã tính),
+// dù không còn ai chờ nhận kết quả — mất tiền thật, 0 kết quả, và với retry
+// 2 lần thì mất tiền tới 2 lần liền cho cùng 1 lượt bấm. Tăng lên 480s (8
+// phút) — đủ dư so với quan sát thật 3-5 phút, để server THẬT SỰ CHỜ ĐƯỢC
+// tới khi Anthropic trả lời, thay vì tự cắt ngang 1 request đằng nào cũng
+// phải trả tiền.
+const AI_TIMEOUT_MS = 480_000; // 180s -> 480s (8 phút): 180s ngắn hơn thời gian xử lý thật của bản vẽ phức tạp, gây bỏ cuộc sớm + mất tiền vô ích
 // (PDF 50-89 trang, dưới ngưỡng chia job 90 trang nên gọi 1 lần duy nhất, cần
 // nhiều thời gian hơn 90s để Claude đọc hết + sinh danh sách BOQ dài) — lỗi
 // đúng là do AbortController CỦA APP tự ngắt ở 90s, không phải Render cắt.
