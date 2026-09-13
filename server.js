@@ -1759,7 +1759,7 @@ function kiemTraAnhBase64(base64, mediaType) {
   };
 }
 
-app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
+async function handleAnalyzeImage(req, res) {
   try {
     const { base64: rawB64, mediaType: rawMt, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!rawB64) return res.status(400).json({ error: "Thiếu base64" });
@@ -1790,7 +1790,8 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
-});
+}
+app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, handleAnalyzeImage);
 
 // ============================================================================
 // POST /api/analyze-images-batch   body: { images:[{base64,mediaType,name}], ghiChuThem, danhSachChuan }
@@ -2235,7 +2236,7 @@ async function xuLyJobPdfLon(jobId) {
   await ghiJob(job);
 }
 
-app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
+async function handleAnalyzePdf(req, res) {
   try {
     const { base64, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Thiếu base64" });
@@ -2279,10 +2280,69 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
-});
+}
+app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, handleAnalyzePdf);
 
 // ============================================================================
-// LƯU TRỮ RIÊNG — thay cho window.storage / localStorage, lưu thật trên server
+// UPLOAD NHỊ PHÂN CHO FILE LỚN — ghép từ ý tưởng V1.7 (ChatGPT), CHỈ LẤY phần
+// đường truyền (browser gửi thẳng byte thô, không phải tự mã hoá base64 rồi
+// nhét vào JSON trước — bước base64-hoá-ở-trình-duyệt làm phình ~33% dữ liệu
+// VÀ giữ thêm 1 bản sao trong RAM trình duyệt, dễ góp phần vào cảm giác "treo"
+// trên máy yếu/di động). KHÔNG lấy phần còn lại của V1.7 (bản đó bỏ hẳn Engine,
+// để AI tự khai "qty" — vi phạm đúng nguyên tắc cốt lõi "AI không tự quyết định
+// khối lượng"). 2 bước:
+//   1) POST /api/analyze-file/init  (JSON, nhỏ) — gửi TRƯỚC mọi thứ ngoài file
+//      (ghiChuThem, danhSachChuan, mẫu tham chiếu...) — trả về uploadId ngắn hạn.
+//   2) POST /api/analyze-file/:uploadId  (binary thô) — CHỈ gửi byte file, ghép
+//      với dữ liệu đã gửi ở bước 1, rồi giao thẳng cho handleAnalyzeImage/
+//      handleAnalyzePdf — TỪ ĐÂY TRỞ ĐI ĐI ĐÚNG con đường an toàn cũ (Engine,
+//      pipeline 9 bước, job nền cho PDF lớn) không khác gì đường base64-JSON.
+// Lý do tách 2 bước thay vì nhét hết vào header: "duToanMauThamChieu" (mẫu dự
+// toán dán nguyên văn) có thể dài hàng chục KB — vượt xa giới hạn kích thước
+// header thông thường (~8KB) của Express/trình duyệt/proxy nếu nhét vào header.
+const choUploadNhiPhan = new Map(); // uploadId -> { metadata, taoLuc }
+const UPLOAD_NHI_PHAN_HET_HAN_MS = 10 * 60 * 1000; // 10 phút — đủ để browser gửi tiếp bước 2 kể cả mạng chậm, dọn tự động tránh rò rỉ RAM nếu bước 2 không bao giờ tới
+
+function donDepUploadNhiPhanHetHan() {
+  const now = Date.now();
+  for (const [id, v] of choUploadNhiPhan) {
+    if (now - v.taoLuc > UPLOAD_NHI_PHAN_HET_HAN_MS) choUploadNhiPhan.delete(id);
+  }
+}
+
+app.post("/api/analyze-file/init", aiLimiter, batBuocDangNhap, (req, res) => {
+  donDepUploadNhiPhanHetHan();
+  const { ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu, name, mediaType, isPdf } = req.body || {};
+  const uploadId = uidBackend("upl");
+  choUploadNhiPhan.set(uploadId, {
+    taoLuc: Date.now(),
+    metadata: { ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu, name, mediaType, isPdf: !!isPdf },
+  });
+  res.json({ uploadId });
+});
+
+app.post(
+  "/api/analyze-file/:uploadId",
+  aiLimiter,
+  batBuocDangNhap,
+  express.raw({ type: "application/octet-stream", limit: "110mb" }), // khớp trần chung đã đặt cho express.json ở trên — file gốc tới ~80MB vẫn lọt
+  async (req, res) => {
+    const phien = choUploadNhiPhan.get(req.params.uploadId);
+    if (!phien) return res.status(400).json({ error: "uploadId không tồn tại hoặc đã hết hạn (quá 10 phút chưa gửi file) — gọi lại /init trước." });
+    choUploadNhiPhan.delete(req.params.uploadId); // dùng 1 lần, xoá ngay tránh dùng lại/rò rỉ
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: "File rỗng hoặc chưa gửi dạng nhị phân đúng (Content-Type phải là application/octet-stream)." });
+    }
+    const base64 = req.body.toString("base64");
+    const { isPdf, mediaType, name, ...meta } = phien.metadata;
+    // Ghép lại ĐÚNG hình dạng req.body mà handleAnalyzeImage/handleAnalyzePdf đã
+    // quen nhận — tái dùng 100% logic Engine/pipeline hiện có, không viết lại.
+    req.body = isPdf ? { base64, name, ...meta } : { base64, mediaType, name, ...meta };
+    return isPdf ? handleAnalyzePdf(req, res) : handleAnalyzeImage(req, res);
+  }
+);
+
+
 // theo từng người dùng. ƯU TIÊN nhận diện qua MÃ ĐĂNG NHẬP (x-access-code) khi
 // công ty đã bật phân quyền (CO_PHAN_QUYEN) — vì mã này chú TỰ GÕ, ổn định qua
 // mọi trình duyệt/thiết bị, không bị mất khi trình duyệt xoá bộ nhớ tạm. Chỉ khi
