@@ -116,7 +116,7 @@ async function ghiTemplateMau(groupId, items, gopThem, nguoiSua) {
     `INSERT INTO estimate_templates (group_id, items, version, updated_at, updated_by) VALUES ($1,$2,1,now(),$3)
      ON CONFLICT (group_id) DO UPDATE SET items=$2, version=estimate_templates.version+1, updated_at=now(), updated_by=$3
      RETURNING group_id, items, version, updated_at, updated_by`,
-    [groupId, JSON.stringify(itemsCuoi), nguoiSua || null]
+    [groupId, itemsCuoi, nguoiSua || null]  // JSONB nhận array/object trực tiếp
   );
   return res.rows[0];
 }
@@ -162,7 +162,7 @@ async function ghiStorage(userKey, dataKey, value) {
   await db.query(
     `INSERT INTO user_storage (user_key, data_key, value, updated_at) VALUES ($1, $2, $3, now())
      ON CONFLICT (user_key, data_key) DO UPDATE SET value = $3, updated_at = now()`,
-    [userKey, dataKey, JSON.stringify(value)]
+    [userKey, dataKey, value]  // JSONB: truyền object/array trực tiếp — KHÔNG JSON.stringify (tránh double-encode)
   );
 }
 
@@ -191,7 +191,7 @@ async function ghiToanBoStorage(userKey, storeObj) {
       await client.query(
         `INSERT INTO user_storage (user_key, data_key, value, updated_at) VALUES ($1, $2, $3, now())
          ON CONFLICT (user_key, data_key) DO UPDATE SET value = $3, updated_at = now()`,
-        [userKey, k, JSON.stringify(storeObj[k])]
+        [userKey, k, storeObj[k]]  // object thuần → JSONB
       );
     }
     await client.query("COMMIT");

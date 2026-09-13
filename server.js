@@ -1937,25 +1937,26 @@ function fileJob(jobId) {
   return path.join(DATA_DIR_JOBS, `${safe}.json`);
 }
 async function docJob(jobId) {
-  // SỬA LỖI THẬT (nguyên nhân xác nhận của lỗi "Job not found" người dùng gặp):
-  // trước đây CHỈ lưu file JSON trên đĩa (data/jobs/) — Render free tier có
-  // filesystem TẠM THỜI, bị xoá sạch mỗi khi server khởi động lại (redeploy,
-  // hết RAM, hoặc tự restart định kỳ) — 1 job PDF lớn xử lý nhiều phút hoàn
-  // toàn có thể bị mất giữa chừng nếu server restart đúng lúc đó. Giờ dùng
-  // Postgres (bền vững, không mất khi restart) nếu đã cấu hình DATABASE_URL;
-  // vẫn fallback về file JSON nếu chưa có Postgres (không đổi hành vi cũ).
+  // Postgres JSONB trả object; bản cũ từng double-stringify nên còn string — hỗ trợ cả hai.
   if (pgStore && process.env.DATABASE_URL) {
     try {
       const res = await pgStore.docStorage("_jobs", jobId);
-      return res ? JSON.parse(res) : null;
+      if (res == null) { /* fallback file */ }
+      else if (typeof res === "string") {
+        try { return JSON.parse(res); } catch (e) { return null; }
+      } else if (typeof res === "object") {
+        return res;
+      }
     } catch (e) { console.error("[Job] lỗi đọc Postgres, fallback file:", e.message); }
   }
   try { return JSON.parse(fs.readFileSync(fileJob(jobId), "utf8")); } catch (e) { return null; }
 }
 async function ghiJob(job) {
+  // Lưu object thuần — storage-postgres ghi JSONB đúng 1 lần (không stringify 2 lớp).
+  // Bản ghi file vẫn JSON.stringify một lần.
   if (pgStore && process.env.DATABASE_URL) {
     try {
-      await pgStore.ghiStorage("_jobs", job.jobId, JSON.stringify(job));
+      await pgStore.ghiStorage("_jobs", job.jobId, job);
       return;
     } catch (e) { console.error("[Job] lỗi ghi Postgres, fallback file:", e.message); }
   }
@@ -2079,9 +2080,12 @@ app.get("/api/jobs/:jobId/status", batBuocDangNhap, async (req, res) => {
   if (!job) return res.status(404).json({ error: "Không tìm thấy job (có thể đã hết hạn hoặc jobId sai)." });
   const soLoXong = job.cacLo.filter((l) => l.trangThai === "xong").length;
   const soLoLoi = job.cacLo.filter((l) => l.trangThai === "loi").length;
+  const soLoDangChay = job.cacLo.filter((l) => l.trangThai === "dang_chay").length;
+  // dang_chay tính 50% lô — UI không đứng 0% / 90% giả trong lúc Claude đang đọc
+  const phanTramXong = Math.min(99, Math.round(((soLoXong + soLoLoi + soLoDangChay * 0.5) / Math.max(1, job.tongSoLo)) * 100));
   res.json({
     jobId: job.jobId, trangThaiTong: job.trangThaiTong, tongSoLo: job.tongSoLo,
-    soLoXong, soLoLoi, phanTramXong: Math.round(((soLoXong + soLoLoi) / job.tongSoLo) * 100),
+    soLoXong, soLoLoi, soLoDangChay, phanTramXong,
     chiTietLo: job.cacLo.map((l) => ({ soLo: l.soLo, trangThai: l.trangThai, loi: l.loi })),
   });
 });
@@ -2159,28 +2163,55 @@ async function chiaPdfLonNeuCanThiet(base64) {
 async function xuLyJobPdfLon(jobId) {
   const job = await docJob(jobId);
   if (!job) return;
-  const SO_LAN_THU_LO = 2; // đồng bộ với xuLyJobNen — xem giải thích ở đó
+  const SO_LAN_THU_LO = 2;
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
     if (lo.trangThai === "xong") continue;
     lo.trangThai = "dang_chay";
+    // Không ghi full base64 mỗi lần cập nhật trạng thái "đang chạy" nếu có thể — vẫn cần 1 lần để status API thấy dang_chay
     await ghiJob(job);
 
     let thanhCong = false, loiLanCuoi = "";
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
       try {
-        const contentBlocks = [
-          { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
-          { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
-          { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
-        ];
-        const data = await callUnifiedAI(contentBlocks, "pdfs-2024-09-25", job.provider);
+        if (!lo.pdfBase64) throw new Error("Thiếu pdfBase64 của lô (đã bị xoá sau xử lý hoặc job hỏng) — tải lại file PDF.");
+        // File > ~3MB base64: ưu tiên Files API (né trần 32MB payload + ổn định hơn)
+        const uocByte = Math.floor((lo.pdfBase64.length * 3) / 4);
+        let contentBlocks;
+        let betaHeader = "pdfs-2024-09-25";
+        if (uocByte > 3 * 1024 * 1024 && typeof uploadPdfToFilesApi === "function" && ANTHROPIC_API_KEY) {
+          try {
+            const fileId = await uploadPdfToFilesApi(lo.pdfBase64, `${job.tenFile || "part"}_${i + 1}.pdf`);
+            const fid = typeof fileId === "string" ? fileId : (fileId?.id || fileId?.file_id);
+            if (!fid) throw new Error("Files API không trả file_id");
+            contentBlocks = [
+              { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
+              { type: "document", source: { type: "file", file_id: fid } },
+              { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
+            ];
+            betaHeader = "pdfs-2024-09-25,files-api-2025-04-14";
+          } catch (upErr) {
+            console.warn("[Job PDF] Files API thất bại, fallback base64:", upErr.message);
+            contentBlocks = null;
+          }
+        }
+        if (!contentBlocks) {
+          contentBlocks = [
+            { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
+            { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
+            { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
+          ];
+        }
+        const data = await callUnifiedAI(contentBlocks, betaHeader, job.provider);
         const rawItems = parseRawJsonTuAI(data);
         const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ name: `${job.tenFile || "document.pdf"} (trang ${lo.tuTrang}-${lo.denTrang})` }]);
         lo.items = items;
         lo.pipelineTrace = pipelineTrace;
         lo.drawingModel = drawingModel;
         lo.trangThai = "xong";
+        // GỐC RỄ treo file lớn: mỗi ghiJob serialize lại toàn bộ base64 PDF → RAM/disk/Postgres phình to.
+        // Sau khi lô xong (hoặc lỗi hết retry) XOÁ base64 khỏi job — không cần để lấy result.
+        delete lo.pdfBase64;
         thanhCong = true;
         const chiPhi = tinhChiPhi(data.usage, undefined, job.provider || AI_PROVIDER);
         lo.chiPhi = chiPhi;
@@ -2191,10 +2222,16 @@ async function xuLyJobPdfLon(jobId) {
         if (lanThu < SO_LAN_THU_LO) await new Promise((r) => setTimeout(r, 5000 * lanThu));
       }
     }
-    if (!thanhCong) { lo.trangThai = "loi"; lo.loi = loiLanCuoi; }
+    if (!thanhCong) {
+      lo.trangThai = "loi";
+      lo.loi = loiLanCuoi;
+      delete lo.pdfBase64; // vẫn giải phóng dù lỗi
+    }
     await ghiJob(job);
   }
   job.trangThaiTong = job.cacLo.every((l) => l.trangThai === "xong") ? "xong" : "co_loi";
+  // Dọn mọi base64 còn sót
+  (job.cacLo || []).forEach((l) => { delete l.pdfBase64; });
   await ghiJob(job);
 }
 
