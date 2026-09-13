@@ -70,8 +70,19 @@ const appStorage = BACKEND_URL ? {
         headers: { "Content-Type": "application/json", "x-user-id": getUserId(), ...authHeaders() },
         body: JSON.stringify({ value: val }),
       });
+      // SỬA LỖI THẬT (chẩn đoán từ triệu chứng thật: "Lỗi lưu" hiện đỏ nhưng
+      // không rõ vì sao — server ĐÃ trả về error.message cụ thể trong thân JSON
+      // khi lưu thất bại, nhưng trước đây chỉ đọc r.ok rồi vứt bỏ toàn bộ nội
+      // dung phản hồi, không có cách nào biết lý do thật để tự sửa/báo đúng
+      // chỗ). Giờ đọc và giữ lại thông báo lỗi thật, gắn vào window để hiển thị.
+      if (!r.ok) {
+        let lyDo = `HTTP ${r.status}`;
+        try { const d = await r.json(); if (d?.error) lyDo = d.error; } catch (e) {}
+        if (typeof window !== "undefined") window.__qsLastSaveError = lyDo;
+      }
       return r.ok;
     } catch (e) {
+      if (typeof window !== "undefined") window.__qsLastSaveError = e.message;
       return false;
     }
   },
@@ -1542,12 +1553,7 @@ export default function QsEstimateApp() {
 
   const [pdfAiAnalyzing, setPdfAiAnalyzing] = useState(null); // id file PDF đang xử lý
   const [pdfAiProgress, setPdfAiProgress] = useState(0); // % tiến độ hiển thị cho người dùng
-  // SỬA THEO YÊU CẦU: thêm mốc thời gian bắt đầu đọc — để hiển thị "đã trôi
-  // qua bao lâu" ngay trên nút, tránh việc màn hình đứng yên ở 1 mức % khiến
-  // người dùng tưởng app treo trong khi thực ra vẫn đang xử lý thật (đã xác
-  // nhận qua nhiều lần: %tiến độ có lúc đứng yên lâu do bản chất chờ AI/poll,
-  // không phải app chết — đồng hồ chạy liên tục chứng minh điều đó rõ hơn %).
-  const [pdfAiStartedAt, setPdfAiStartedAt] = useState(null);
+  const [pdfAiStartedAt, setPdfAiStartedAt] = useState(null); // mốc bắt đầu đọc — dùng cho đồng hồ đếm giờ trên nút
 
   // Gửi thẳng file PDF cho AI đọc (Claude đọc PDF trực tiếp, không cần thư viện
   // ngoài / CDN nào cả — tránh lỗi mạng khi tải pdf.js). AI đọc toàn bộ các trang
@@ -1668,7 +1674,7 @@ export default function QsEstimateApp() {
           const jobId = data.jobId;
           let trangThaiTong = "dang_chay";
           let soVongCho = 0;
-          while (trangThaiTong === "dang_chay" && soVongCho < 1200) { // tối đa ~1200×3s = 60 phút chờ — đủ dư so với trần thật phía server (2 lần thử x 20 phút = tối đa 40 phút/lô), chừa ~20 phút đệm
+          while (trangThaiTong === "dang_chay" && soVongCho < 1200) { // tối đa ~1200×3s = 60 phút chờ — đủ dư so với trần server (2 lần thử x 20 phút = tối đa 40 phút/lô)
             await new Promise((r) => setTimeout(r, 3000));
             soVongCho++;
             let resStatus;
@@ -3090,7 +3096,7 @@ export default function QsEstimateApp() {
           <div className="text-xs flex items-center gap-1.5" style={{ color: "#9FB2C4" }}>
             {saveState === "saving" && <><Save size={12} className="animate-pulse" /> Đang lưu…</>}
             {saveState === "saved" && <><CheckCircle2 size={12} color={GREEN} /> Đã lưu</>}
-            {saveState === "error" && <><AlertTriangle size={12} color={RED} /> Lỗi lưu</>}
+            {saveState === "error" && <><AlertTriangle size={12} color={RED} /> Lỗi lưu{typeof window !== "undefined" && window.__qsLastSaveError ? `: ${window.__qsLastSaveError}` : ""}</>}
           </div>
           {authUser?.coPhanQuyen && (
             <div className="text-xs flex items-center gap-2" style={{ color: "#9FB2C4" }}>
@@ -3579,12 +3585,7 @@ function PctField({ label, value, onChange }) {
 // TAB: ĐỌC BẢN VẼ (Drawing Intake — upload ảnh, AI đọc khối lượng, khớp định mức)
 // ============================================================================
 function DrawingsTab({ versions, photos, addDrawingVersion, handlePhotoFiles, analyzePhotoAI, analyzePhotosBatchAI, aiAnalyzing, aiProgress, aiError, aiResults, lastRawDebug, lastPipelineTrace, lastDrawingModel, applyAiResult, skipAiResult, applyAllAiResults, projectNorms, drawingFiles, handleDrawingFiles, removeDrawingFile, removePhoto, removeAllPhotos, analyzePdfAI, pdfAiAnalyzing, pdfAiProgress, pdfAiStartedAt, docFileDxf, boqLines, activeProject, setActiveTab, aiCostLast, aiCostTotal, testBackend, connTest, connTesting, authUser, authHeaders, danhSachChuanInfo, soSanhMauLienKet, themDauViecThieu }) {
-  // SỬA THEO YÊU CẦU (đồng hồ đếm thời gian khi AI đang đọc bản vẽ — tránh
-  // hiểu nhầm "treo" khi % đứng yên lâu do bản chất chờ AI/poll job nền):
-  // "nhipDongHo" chỉ dùng để ÉP component re-render mỗi giây trong lúc đang
-  // đọc — bản thân giá trị không dùng tới, chỉ mốc thời gian thật (Date.now()
-  // trừ pdfAiStartedAt) mới là số hiển thị, nên đồng hồ luôn đúng thật dù có
-  // bị bỏ lỡ vài nhịp setInterval (không cộng dồn sai như đếm bằng biến đếm).
+  // Đồng hồ đếm giờ khi AI đang đọc — tránh hiểu nhầm "treo" khi % đứng yên lâu
   const [nhipDongHo, setNhipDongHo] = useState(0);
   useEffect(() => {
     if (!pdfAiStartedAt) return;
@@ -4048,7 +4049,7 @@ function DrawingsTab({ versions, photos, addDrawingVersion, handlePhotoFiles, an
                             </div>
                             <div className="text-xs mb-2 flex items-center gap-1" style={{ color: SLATE }}>
                               <span className="inline-block w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: GREEN }} />
-                              Vẫn đang chạy thật (đồng hồ trên vẫn tăng) — % có thể đứng yên 1 lúc do đang chờ AI xử lý, KHÔNG phải app treo. Chỉ khi đồng hồ ngừng tăng nhiều phút liền mới là dấu hiệu treo thật.
+                              Vẫn đang chạy thật (đồng hồ trên vẫn tăng) — % có thể đứng yên 1 lúc do đang chờ AI xử lý, KHÔNG phải app treo.
                             </div>
                           </>
                         )}
