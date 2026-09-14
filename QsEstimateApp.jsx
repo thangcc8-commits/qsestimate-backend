@@ -1606,7 +1606,13 @@ export default function QsEstimateApp() {
         showToast(ketQua.thongBao || `File "${file.name}" không đọc được entity nào.`, ketQua.loaiThongBao || "error");
         return;
       }
-      setAiResults((prev) => [...prev, ...ganhDauNghiTrung(ketQua.items)]);
+      const moiDoc0 = ganhDauNghiTrung(ketQua.items);
+      setAiResults((prev) => [...prev, ...moiDoc0]);
+      // SỬA THEO YÊU CẦU: tự động đưa thẳng vào BOQ ngay sau khi đọc xong —
+      // bỏ hẳn bước phải bấm "Duyệt tất cả" tay, giống hệt cách chat Claude
+      // thường (gửi bản vẽ + mẫu, nhận thẳng kết quả cuối, không có bước
+      // duyệt tay ở giữa).
+      apDungDanhSachVaoBoq(moiDoc0);
       if (ketQua.thongBao) showToast(ketQua.thongBao, ketQua.loaiThongBao || "ok");
     } catch (e) {
       showToast(`Lỗi đọc file DXF: ${e.message}. Có thể file bị lỗi hoặc chứa entity chưa hỗ trợ.`, "error");
@@ -1785,7 +1791,11 @@ export default function QsEstimateApp() {
             model: modelDaDung,
           };
         });
-        setAiResults((prev) => [...prev, ...ganhDauNghiTrung(withMatch)]);
+        const moiDoc = ganhDauNghiTrung(withMatch);
+        setAiResults((prev) => [...prev, ...moiDoc]);
+        // SỬA THEO YÊU CẦU: tự động đưa thẳng vào BOQ, bỏ bước duyệt tay —
+        // xem giải thích đầy đủ ở lần dùng đầu tiên của mẫu này phía trên.
+        apDungDanhSachVaoBoq(moiDoc);
         showToast(`AI đọc được ${parsed.length} hạng mục từ "${pdfEntry.name}"${ghiChuThem ? " (đã đọc theo yêu cầu bổ sung)" : ""} — kiểm tra khớp định mức rồi mới thêm vào BOQ.`, "warn");
       } else {
         showToast(`File "${pdfEntry.name}" không có bảng số liệu rõ ràng để AI đọc khối lượng.`, "warn");
@@ -2246,7 +2256,11 @@ export default function QsEstimateApp() {
             model: modelDaDung,
           };
         });
-        setAiResults((prev) => [...prev, ...ganhDauNghiTrung(withMatch)]);
+        const moiDoc = ganhDauNghiTrung(withMatch);
+        setAiResults((prev) => [...prev, ...moiDoc]);
+        // SỬA THEO YÊU CẦU: tự động đưa thẳng vào BOQ, bỏ bước duyệt tay —
+        // xem giải thích đầy đủ ở lần dùng đầu tiên của mẫu này phía trên.
+        apDungDanhSachVaoBoq(moiDoc);
         showToast(`AI đọc được ${parsed.length} hạng mục từ "${photo.name}"${ghiChuThem ? " (đã đọc theo yêu cầu bổ sung)" : ""} — kiểm tra khớp định mức rồi mới thêm vào BOQ (không thay thế bóc tách chuyên môn).`, "warn");
       } else {
         showToast(`Ảnh "${photo.name}" không có bảng số liệu rõ ràng để AI đọc khối lượng.`, "warn");
@@ -2323,7 +2337,11 @@ export default function QsEstimateApp() {
             matchedNormId: match.normId, matchScore: match.score, goiYNormId: match.goiYNormId, lyDoKhongTuXacNhan: match.lyDoKhongTuXacNhan, model: data.model || null,
           };
         });
-        setAiResults((prev) => [...prev, ...ganhDauNghiTrung(withMatch)]);
+        const moiDoc = ganhDauNghiTrung(withMatch);
+        setAiResults((prev) => [...prev, ...moiDoc]);
+        // SỬA THEO YÊU CẦU: tự động đưa thẳng vào BOQ, bỏ bước duyệt tay —
+        // xem giải thích đầy đủ ở lần dùng đầu tiên của mẫu này phía trên.
+        apDungDanhSachVaoBoq(moiDoc);
         showToast(`AI đọc gộp ${danhSachAnh.length} ảnh cùng lúc, đối chiếu chéo giữa các trang — ra ${parsed.length} hạng mục. Kéo xuống "Bước 2" để duyệt.`);
       } else {
         showToast(`AI đã đọc gộp ${danhSachAnh.length} ảnh nhưng không trích được hạng mục nào.`, "warn");
@@ -2341,6 +2359,10 @@ export default function QsEstimateApp() {
     }
   };
 
+  // LƯU Ý: từ khi có tự động thêm vào BOQ ngay lúc đọc xong (apDungDanhSachVaoBoq
+  // gọi tự động), hàm này chỉ còn cần cho trường hợp hiếm: 1 dòng AI đọc chưa tự
+  // khớp đúng định mức, người dùng muốn CHỌN TAY 1 định mức khác rồi thêm — vẫn
+  // giữ lại vì hữu ích, không xoá.
   const applyAiResult = (key, normId) => {
     if (activeProject?.khoaBoq) { showToast(`Dự án đang KHOÁ — không thêm được dòng mới vào BOQ.`, "error"); return; }
     const r = aiResults.find((x) => x.key === key);
@@ -2368,18 +2390,24 @@ export default function QsEstimateApp() {
   // vào thẻ "Dự án" bổ sung đơn giá thật cho các định mức mới này.
   // Mỗi dòng gắn trạng thái CONFIRMED (khớp mẫu, đã có giá) hoặc REVIEW (mới tạo,
   // cần chú tự kiểm tra) — để biết ngay dòng nào tin được, dòng nào phải xem lại.
-  const applyAllAiResults = () => {
-    if (activeProject?.khoaBoq) { showToast(`Dự án đang KHOÁ — không thêm được dòng mới vào BOQ. Mở khoá ở thẻ Dự án nếu cần.`, "error"); return; }
-    if (!aiResults.length) return;
+  // SỬA THEO YÊU CẦU: tách phần "áp kết quả vào BOQ" thành hàm dùng lại được,
+  // nhận thẳng mảng kết quả làm tham số — thay vì chỉ đọc từ state "aiResults"
+  // (vốn cập nhật bất đồng bộ, không dùng ngay lập tức được sau khi vừa
+  // setAiResults). Nhờ vậy có thể gọi NGAY sau khi đọc xong (tự động, không
+  // cần người bấm "Duyệt tất cả" nữa) — giống hệt cách chat Claude thường:
+  // gửi bản vẽ + mẫu, nhận thẳng kết quả cuối, không có bước duyệt tay ở giữa.
+  const apDungDanhSachVaoBoq = (danhSach, { imLang } = {}) => {
+    if (activeProject?.khoaBoq) { if (!imLang) showToast(`Dự án đang KHOÁ — không thêm được dòng mới vào BOQ. Mở khoá ở thẻ Dự án nếu cần.`, "error"); return 0; }
+    if (!danhSach || !danhSach.length) return 0;
     let soTaoMoi = 0;
-    const newBoqItems = aiResults.map((r) => {
+    const newBoqItems = danhSach.map((r) => {
       let normId = r.matchedNormId;
       let trangThai = "confirmed";
       if (!normId) {
         normId = addNorm(
           { code: uid("AI").toUpperCase(), name: r.name, unit: r.unit || "-", standard: "", groups: [activeProject?.groupId], vt: [], nc: [], may: [] },
           "local",
-          `Tự tạo khi duyệt hàng loạt từ AI đọc bản vẽ "${r.sourcePhoto}" — CHƯA CÓ GIÁ, cần bổ sung đơn giá vật tư/nhân công thật.`,
+          `Tự tạo khi AI đọc bản vẽ "${r.sourcePhoto}" — CHƯA CÓ GIÁ, cần bổ sung đơn giá vật tư/nhân công thật.`,
           true
         );
         soTaoMoi++;
@@ -2388,13 +2416,23 @@ export default function QsEstimateApp() {
       return { id: uid("boq"), projectId: activeProjectId, normId, qty: r.qty, khoanPrice: null, included: true, category: r.category || "cat-hoanthien", ghiChu: r.note || "", trangThai, sourcePhoto: r.sourcePhoto || "", model: r.model || null, ngayDoc: new Date().toISOString(), evidence_region: r.evidence_region || null, confidenceMatrix: r.confidenceMatrix || null };
     });
     setBoqItems((prev) => [...prev, ...newBoqItems]);
-    const tongSo = aiResults.length;
+    if (!imLang) {
+      showToast(
+        `Đã tự động thêm ${danhSach.length} dòng vào BOQ` +
+        (soTaoMoi > 0 ? ` (trong đó ${soTaoMoi} dòng chưa có định mức sẵn — GIÁ ĐANG LÀ 0Đ, vào thẻ "Dự án → Định mức" bổ sung giá thật trước khi xuất báo giá chính thức).` : "."),
+        soTaoMoi > 0 ? "warn" : "ok"
+      );
+    }
+    return danhSach.length;
+  };
+
+  const applyAllAiResults = () => {
+    // SỬA THEO YÊU CẦU: kết quả giờ đã TỰ ĐỘNG vào BOQ ngay lúc đọc xong (xem
+    // apDungDanhSachVaoBoq gọi ngay sau setAiResults ở các hàm đọc PDF/ảnh) —
+    // nút này giờ chỉ còn tác dụng "đã xem xong, ẩn danh sách đi", KHÔNG được
+    // thêm lại lần nữa (nếu thêm lại sẽ tạo trùng dòng BOQ, vì bản ghi gốc đã
+    // được thêm tự động từ trước rồi).
     setAiResults([]);
-    showToast(
-      `Đã duyệt & thêm ${tongSo} dòng vào BOQ` +
-      (soTaoMoi > 0 ? ` (trong đó ${soTaoMoi} dòng chưa có định mức sẵn — đã tự tạo định mức mới, GIÁ ĐANG LÀ 0Đ, vào thẻ "Dự án → Định mức" bổ sung giá thật trước khi xuất báo giá chính thức).` : "."),
-      soTaoMoi > 0 ? "warn" : "ok"
-    );
   };
 
   // ---- Xuất PDF THẬT — dùng pdf-lib (không phải chỉ "In" trình duyệt như trước).

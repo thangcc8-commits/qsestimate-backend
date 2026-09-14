@@ -53,6 +53,24 @@ function getUserId() {
 // Có BACKEND_URL -> lưu thật trên server riêng (bền, xem được từ máy khác).
 // Không có -> ưu tiên window.storage (Claude.ai cấp), rồi mới tới localStorage.
 // ============================================================================
+// SỬA LỖI THẬT (nguyên nhân gốc của "Lỗi lưu" — xác nhận qua thông báo lỗi
+// thật hiện ra: "Can't find variable: authHeaders"): appStorage.set() nằm ở
+// PHẠM VI MODULE (chạy khi file vừa tải, TRƯỚC CẢ KHI component chính tồn
+// tại), nhưng lại gọi authHeaders() — 1 hàm CHỈ được định nghĩa BÊN TRONG
+// component chính (qua useCallback, rất xa phía dưới) — nên không thể truy
+// cập được, luôn crash ngay lập tức = LƯU LUÔN LUÔN THẤT BẠI 100% các lần,
+// không phải thỉnh thoảng. Sửa: đọc thẳng "qs_access_code" từ localStorage
+// (đúng nơi accessCode của component cũng đọc/ghi) — không cần phụ thuộc
+// biến của component nữa, dùng được ở cả 2 nơi.
+function layAuthHeaderModule() {
+  try {
+    const ma = localStorage.getItem("qs_access_code");
+    return ma ? { "x-access-code": ma } : {};
+  } catch (e) {
+    return {};
+  }
+}
+
 const appStorage = BACKEND_URL ? {
   get: async (key) => {
     try {
@@ -67,7 +85,7 @@ const appStorage = BACKEND_URL ? {
     try {
       const r = await fetch(`${BACKEND_URL}/api/storage/${key}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-user-id": getUserId(), ...authHeaders() },
+        headers: { "Content-Type": "application/json", "x-user-id": getUserId(), ...layAuthHeaderModule() },
         body: JSON.stringify({ value: val }),
       });
       // SỬA LỖI THẬT (chẩn đoán từ triệu chứng thật: "Lỗi lưu" hiện đỏ nhưng
@@ -288,10 +306,47 @@ const SEED_NORMS = [
 // THAY THẾ hoàn toàn bản mặc định này (xem layDuToanMauThamChieu()).
 const SEED_DU_TOAN_MAU_MAC_DINH = {
   shophouse:
-    "S1 | Công trình tham chiếu: Shophouse S6-38, Sun Grand City New An Thới, Phú Quốc — 5 tầng + Áp mái, footprint 6,0m × 13,1m (GFA ~471,6m²), 10 phòng khách, 11 WC.\n" +
-    "S2 | Đặc điểm QUAN TRỌNG của loại hình Shophouse: vỏ bao che mặt NGOÀI (tường bao, mái, cửa mặt tiền) THƯỜNG đã được chủ đầu tư/Sun Group bàn giao hoàn thiện sẵn — KHÔNG xây/tô/sơn lại mặt ngoài. Chỉ tính: xây tường NGĂN NỘI BỘ, tô bổ sung mặt TRONG tường bao, hoàn thiện trong nhà (sàn/trần/sơn trong/thiết bị/nội thất/MEP). Nếu bản vẽ mới KHÔNG có ghi chú tương tự (VD công trình độc lập chưa có vỏ bao che), PHẢI tính đủ cả tường bao ngoài — không mặc định giống mẫu.\n" +
-    "S3 | Tỷ lệ hình học đã đo thật (dùng làm tham khảo, KHÔNG áp đặt cứng): xây tường ngăn nội bộ ~0,63 m²/m² GFA; tô trát ~2,65 m²/m² GFA (gồm cả 2 mặt tường ngăn + mặt trong tường bao); chống thấm WC+ban công ~0,19 m²/m² GFA; cán nền ~0,84 m²/m² GFA. Các tỷ lệ này PHỤ THUỘC mật độ phòng/WC thực tế của công trình mới — công trình có nhiều phòng/WC hơn trên cùng diện tích sẽ có tỷ lệ tường ngăn CAO HƠN, cần điều chỉnh và ghi rõ lý do.\n" +
-    "S4 | Method luận đơn giá: PT CONS dùng đơn giá TRỌN GÓI (khoán) theo m²/m³ cho từng công tác riêng biệt (không tách vật tư/nhân công), tham khảo mức giá đã áp dụng cho Phú Quốc — nếu công trình mới ở vùng khác, đơn giá vật tư có thể cần điều chỉnh theo chi phí vận chuyển vùng miền (đảo thường cao hơn đất liền).",
+    "A1 | Bản vẽ gốc chỉ có MBKT (kiến trúc), KHÔNG có bản vẽ kết cấu, MEP, mặt cắt, bảng thống kê cửa. Toàn bộ khối lượng V1.1 được suy luận theo quy tắc QS chuẩn (định mức m²/m² sàn, % lỗ mở), KHÔNG phải bóc tách 100% từ hồ sơ thi công.\n" +
+    "A2 | Diện tích sàn gộp (GFA) mỗi tầng điển hình = 6.000mm x 13.100mm = 78,6 m² (theo lưới trục A-D và 4-5).\n" +
+    "A3 | Cao độ tầng: Tầng 1 (±0.000 → +3.900) = 3,9m. Do cao độ Tầng 3/4 không đọc rõ trên bản vẽ, suy luận đều module 3,3m cho Tầng 2→Áp mái: Tầng2=+3.900, Tầng3=+7.200, Tầng4=+10.500, Tầng5=+13.800, Áp mái=+17.100 (khớp 2 mốc rõ nhất +13.800 và +17.100). ĐỀ NGHỊ ĐỐI CHIẾU LẠI FILE CAD GỐC.\n" +
+    "A4 | Tỷ lệ lỗ mở (cửa đi, cửa sổ) trừ vào tường xây: 30% cho tường ngoài (mặt tiền hướng biển, nhiều kính theo tiêu chuẩn resort 4 sao), 15% cho tường ngăn phòng.\n" +
+    "A6 | Cơ cấu tường: 70% tường 100mm (ngăn phòng khô), 30% tường 200mm (bao che ngoài + khu ướt).\n" +
+    "A8 | Chống thấm: sàn WC + chân tường lên 300mm, sàn mái BTCT, sân thượng/vườn Áp mái, sàn window seat/ban công. WC mỗi tầng ước ~4-5m²/WC theo tỷ lệ hình trên MBKT.\n" +
+    "A10 | Tầng Áp mái: theo bản vẽ có khu vườn/sân trồng cây (không mái che) chiếm ~50% diện tích; phần còn lại (Kho quản gia, Phòng KT, WC, Heat pump) là khu kín 50%.\n" +
+    "A12 | VAT áp dụng 8% theo chính sách giảm thuế hiện hành cho nhóm hàng hóa/dịch vụ xây dựng (cần xác nhận lại tại thời điểm ký hợp đồng).\n" +
+    "A13 | Dự phòng phí: 5% cho khối lượng phát sinh + 3% trượt giá (do vận chuyển vật tư ra đảo Phú Quốc, biến động giá) = tổng 8% trên giá trị trước VAT.\n" +
+    "A14 | Phân vùng gạch nền theo tầng: Tầng 1 = 40% diện tích sàn net là khu công cộng (Sảnh/Reception/Kho); Tầng 2-5 = 15% là hành lang/cầu thang; Áp mái = 50% là khu kỹ thuật (Kho quản gia/Phòng KT). Phần còn lại tính là gạch phòng.\n" +
+    "A17 | Gạch ốp tường WC: hệ số quy đổi 3,2 m² ốp tường / 1 m² sàn WC (tương ứng phòng WC ~4-5m², ốp cao đến trần ~2,4-2,7m, trừ cửa/thiết bị).\n" +
+    "A18 | Đơn giá gạch/sơn/trần tham khảo phân khúc vật liệu granite/porcelain nhập khẩu hoặc sản xuất trong nước cao cấp phù hợp khách sạn 4 sao, CHƯA VAT, đã gồm nhân công + vật tư phụ, CHƯA gồm vận chuyển đặc thù ra đảo (đã tính trong dự phòng trượt giá 3% tại Tổng hợp).\n" +
+    "A20 | Định mức điểm điện/phòng khách (Lighting 14, Socket 12, Power 4 mạch, ELV 1 bộ, Internet 2, TV 1) tham khảo tiêu chuẩn phòng khách sạn 4 sao diện tích ~24m² có bếp nhỏ (pantry). CẦN đối chiếu lại khi có bản vẽ điện chi tiết.\n" +
+    "A22 | Cáp trục đứng feeder (từ MSB lên các tủ tầng) ước lượng 120m dựa theo chiều cao công trình 17,1m và hệ số đi dây ngang+dự phòng ~x1,4. Cần xác định lại khi có sơ đồ nguyên lý điện.\n" +
+    "A25 | Hệ số ống nhánh cấp nước 6m/điểm và thoát nước 5m/điểm là ước tính khoảng cách trung bình từ trục đứng đến thiết bị trong 1 phòng ~24m². Cần xác nhận khi có bản vẽ MEP.\n" +
+    "A26 | Chiều cao công trình dùng cho ống trục đứng lấy bằng cao độ đỉnh Tầng 5 = 17,1m (tham chiếu Takeoff_Input); bố trí 2 trục cấp nước + 2 trục thoát nước/thông hơi phục vụ các khối WC chồng tầng.\n" +
+    "A27 | Dung tích bể nước ngầm 5.000L + bồn mái 2.000L tính theo định mức 200L/người/ngày x ước lượng 25-30 khách lưu trú (5 phòng x tối đa 2 khách + dự phòng sinh hoạt). Cần tính toán lại theo công suất kinh doanh thực tế. [LƯU Ý: số '5 phòng' trong công thức này là số CŨ trước khi sửa — công trình thực tế có 10 phòng (xem A54), cần tính lại dung tích bể theo đúng 10 phòng nếu áp dụng cho công trình mới.]\n" +
+    "A29 | SỬA LỖI: Diện tích phòng khách Tầng 2-5 lấy trực tiếp theo nhãn diện tích trên bản vẽ gốc = 23,90 m²/phòng (thay vì suy luận theo tỷ lệ hành lang trước đây cho kết quả sai lệch ~57m²/phòng). Diện tích Tầng 1 (35,39m²) và Áp mái vẫn dùng phương pháp tỷ lệ do không có nhãn rõ ràng.\n" +
+    "A30 | Định mức tải lạnh 650 BTU/m² (phòng khách) và 500 BTU/m² (khu công cộng) theo tiêu chuẩn khí hậu nhiệt đới Phú Quốc, phòng cách nhiệt tốt (tường 200mm bao che, kính hạn chế bức xạ). Công suất máy chọn làm tròn lên bậc tiêu chuẩn gần nhất (9.000/12.000/18.000/24.000 BTU).\n" +
+    "A31 | Khoảng cách trung bình dàn nóng-dàn lạnh 5m (ống đồng), bảo ôn bọc cả 2 đường ống cùng chiều dài, ống nước ngưng 6m/máy đấu về điểm thoát gần nhất. Các hệ số này cần điều chỉnh khi có bản vẽ bố trí dàn nóng thực tế (vị trí ban công/mặt ngoài).\n" +
+    "A33 | Gói nội thất chuẩn hóa áp dụng đồng nhất cho cả 10 phòng khách [ĐÃ SỬA từ 5 phòng ban đầu - xem A54] (Giường, 2 tủ đầu giường, Wardrobe 4,8m², bàn+2 ghế, window seat, Pantry 3,5m²+1,2m² mặt đá+thiết bị âm tủ, TV Cabinet 1,6m²). Bản vẽ gốc có ghi chú riêng biệt một số nội thất đặc thù (BÀN XẾP TƯỜNG - Tầng 1, GIƯỜNG XẾP - Tầng 5, Sofa Bed - khu vực gần Tầng 4) CHƯA được bóc tách riêng do thiếu bản vẽ nội thất chi tiết (Interior Design Drawing/Shop Drawing).\n" +
+    "A39 | Công trình cao 17,1m (5 tầng + Áp mái), thuộc nhóm nhà ở kết hợp thương mại dịch vụ quy mô nhỏ. Bóc khối lượng PCCC giả định công trình THUỘC diện phải trang bị hệ Sprinkler tự động + bơm chữa cháy dự phòng Diesel theo QCVN 06:2022/BXD.\n" +
+    "A41 | Bán kính bảo vệ Sprinkler 12m²/đầu áp dụng cho khu vực nguy cơ cháy thấp (Light Hazard) theo tiêu chuẩn khách sạn; số lượng đầu phun là ước tính theo tổng GFA, chưa bố trí chi tiết theo mặt bằng trần từng phòng.\n" +
+    "A43 | Thang máy phục vụ 6 điểm dừng (Tầng 1 → Áp mái), hành trình lấy theo cao độ đỉnh Tầng 5 = 17,1m (đồng bộ giả định chiều cao công trình tại A3/A26). Áp mái là khu BOH (Kho quản gia/Phòng KT) nên thang máy có dừng tại đây để phục vụ vận chuyển đồ dùng/bảo trì.\n" +
+    "A44 | Đơn giá thang máy 650kg trọn bộ (680 triệu) là đơn giá gói cơ bản tham khảo dòng thang nội địa Việt Nam (lắp ráp trong nước, linh kiện nhập khẩu hoặc sản xuất nội địa) thương hiệu Phát Thành/Pacific, cho hành trình và số điểm dừng tiêu chuẩn; CHƯA VAT. Đơn giá thực tế phụ thuộc báo giá chính thức của NCC theo hồ sơ kỹ thuật cụ thể (kích thước hố thang, phòng máy nếu có, đặc điểm công trình đảo).\n" +
+    "A45 | Chi phí vận chuyển thiết bị thang máy ra đảo Phú Quốc (45 triệu) là ước tính riêng biệt do đặc thù thiết bị cồng kềnh (đối trọng, ray dẫn hướng dài), cao hơn đáng kể so với hệ số dự phòng trượt giá chung 3% áp dụng cho các hạng mục khác - đã tách riêng thành dòng chi phí độc lập thay vì dựa vào dự phòng chung.\n" +
+    "A48 | Diện tích đá ốp sảnh thang máy (4,5m² tường + 3,5m² sàn + 2,0m² khung bao cửa /tầng) là ước tính theo quy mô sảnh chờ nhỏ (công trình 78,6m²/tầng); không có bản vẽ nội thất sảnh thang máy chi tiết để bóc chính xác.\n" +
+    "A49 | Số bậc cầu thang tính theo chiều cao tầng / 170mm (chiều cao bậc tiêu chuẩn TCVN), làm tròn lên; chiều rộng vế thang giả định 1,0m theo quan sát các số thứ tự bậc thang (1-19) thể hiện trên MBKT các tầng. Tay vịn lan can tính bằng chiều dài vế thang + 15% cho chiếu nghỉ/góc; tay vịn phụ gắn tường ước 50% chiều dài.\n" +
+    "A50 | Hệ thống hút mùi bếp tính riêng biệt cho từng Pantry (không có bếp trung tâm); ống gió thải ngắn (2,5m/phòng) do giả định Pantry bố trí gần tường ngoài để thoát khí trực tiếp.\n" +
+    "A54 | SỬA LỖI: Số phòng khách thực tế = 10 phòng (không phải 5 như các phiên bản trước): Tầng 1 = Phòng số 1 (1 phòng); Tầng 2 = Phòng số 2+3; Tầng 3 = Phòng số 4+5; Tầng 4 = Phòng số 6+7; Tầng 5 = Phòng số 8+9; Áp mái = Phòng số 10. Tổng 12 WC = 11 WC khách (Phòng 1 có 2 WC: WC1+WC1-1; các phòng còn lại 1 WC/phòng) + 1 WC nhân viên (WC11, khu Kho-quản gia/Phòng KT Áp mái).\n" +
+    "A55 | Diện tích các phòng Tầng 2-5 lấy trực tiếp theo nhãn trên bản vẽ: 23,90m² (7 phòng: số 2,3,4,5,6,7,8) và 28,90m² (2 phòng: số 9,10 - phòng lớn hơn). Diện tích WC từng tầng ước theo tổng 2 WC/tầng dựa trên nhãn diện tích từng WC khi đọc được (WC2=4,95m², WC3=3,95m², WC4=4,5m², WC6=5,7m², WC7=3,95m², WC8=4,8m², WC9=3,4m², WC10=4,8m²); WC5 và WC11 không có nhãn diện tích rõ ràng trên bản vẽ - ước theo WC liền kề cùng tầng.\n" +
+    "A56 | ĐIỀU CHỈNH CÔNG SUẤT MÁY LẠNH THỰC TẾ theo kinh nghiệm thi công của CĐT: công suất lý thuyết tính theo 650 BTU/m² cho phòng trống, nhưng khi lắp đầy nội thất (giường, tủ, sofa...) thể tích không khí cần làm lạnh giảm đáng kể so với phòng trống. Do đó BOQ áp dụng công suất THỰC TẾ thấp hơn 1 bậc so với lý thuyết: phòng 23,9m² dùng 12.000 BTU (1,5HP) thay vì 18.000 BTU (2HP); phòng 28,9m² và Phòng số 1 (35,4m²) dùng 18.000 BTU (2HP) thay vì 24.000 BTU (2,5HP). Cột 'Công suất lý thuyết' vẫn giữ lại tại Takeoft_HVAC để đối chiếu/kiểm toán. Đây là quyết định kỹ thuật dựa trên kinh nghiệm hiện trường, khác biệt so với tính toán lý thuyết thuần túy - đề nghị CĐT xác nhận trước khi thi công, đặc biệt với phòng có hướng nắng gắt hoặc cách nhiệt kém.\n" +
+    "A58 | SỬA LỖI QUAN TRỌNG: Công trình là shophouse được CĐT/Sun Group bàn giao đã hoàn thiện kết cấu + hoàn thiện mặt NGOÀI của tường bao che (sơn/tô mặt ngoài, mặt tiền). Nhà thầu KHÔNG xây và KHÔNG tô mặt ngoài tường bao - chỉ thi công: (a) tô bổ sung mặt TRONG tường bao ngoài (1 mặt), và (b) xây + tô 2 mặt toàn bộ tường ngăn nội bộ. Khối lượng 'Xây tường' và 'Tô trát' tại BOQ_V1.1 đã được tách riêng theo đúng phạm vi công việc thực tế này (xem Revision R13). Diện tích tường ngoài (Ext_net, Takeoff_Input cột I) vẫn được giữ lại trong Takeoff_Input để tính SƠN NGOẠI THẤT tại BOQ_V1.2 - CẦN XÁC NHẬN LẠI với CĐT liệu sơn ngoại thất mặt ngoài có nằm trong phạm vi bàn giao hay không; nếu CĐT đã sơn ngoại thất luôn thì mục Sơn ngoại thất (FIN-SON-020, BOQ_V1.2) cũng cần loại bỏ tương tự.\n" +
+    "A59 | SỬA ĐƠN GIÁ: Đơn giá sơn nước phiên bản trước (68.000đ/m² nội thất, 92.000đ/m² ngoại thất) chỉ phản ánh chi phí NHÂN CÔNG, chưa gồm vật tư sơn (bột bả 2 lớp, sơn lót, sơn phủ 2-3 lớp). Đã điều chỉnh lên đơn giá TRỌN GÓI (vật tư+nhân công) 145.000đ/m² (nội thất) và 175.000đ/m² (ngoại thất chống thấm kiềm/chịu mặn), tham khảo dòng sơn cao cấp Dulux/Jotun/Kova phù hợp khách sạn 4 sao. CẦN xin báo giá đại lý sơn chính thức kèm định mức phủ (m²/lít) để chốt đơn giá cuối trước khi phát hành mời thầu.\n" +
+    "A60 | SỬA XÁC NHẬN: Trả lời câu hỏi treo tại A58 - mặt ngoài tường bao ĐÃ được Sun Group sơn hoàn thiện khi bàn giao (khoảng 5 năm trước), nay đã xuống cấp do khí hậu biển Phú Quốc (rêu mốc, bạc màu, nứt/bong tróc cục bộ) nên CẦN sơn sửa chữa lại - không phải sơn mới. Phạm vi: vệ sinh bề mặt (phun áp lực loại bỏ rêu mốc) + xử lý cục bộ vết nứt/bong tróc (không bả toàn bộ như sơn mới) + sơn lót lại tại vị trí xử lý + 2 lớp phủ ngoại thất mới. Đơn giá 110.000đ/m² thấp hơn sơn mới (175.000đ/m²) do không cần bả matit toàn bộ bề mặt, nhưng CẦN khảo sát thực tế hiện trạng mặt ngoài (mức độ xuống cấp thực tế) để xác nhận lại phạm vi và đơn giá trước khi thi công - nếu xuống cấp nặng (nứt kết cấu, bong tróc lan rộng) có thể cần bả sửa chữa toàn bộ, chi phí sẽ tăng.\n" +
+    "A64 | Gương bàn trang điểm có đèn cảm biến TÁCH RIÊNG khỏi giá bàn trang điểm (FUR-BANGHE-010 giảm từ 4.200.000 xuống 3.600.000đ/bộ do không còn gồm gương cơ bản); gương WC (SAN-PHUKIEN-010) nâng cấp lên loại có cảm biến, giá tăng từ 1.450.000 lên 1.950.000đ/cái; bộ phụ kiện WC (SAN-PHUKIEN-020) làm rõ đủ 7 món, giá tăng từ 980.000 lên 1.450.000đ/bộ phản ánh đúng số lượng phụ kiện.\n" +
+    "A65 | THAY ĐỔI THIẾT KẾ HVAC QUAN TRỌNG: Dàn nóng máy lạnh chuyển từ lắp đặt tại ban công/mặt ngoài từng phòng sang TẬP TRUNG trên MÁI công trình (giữ mỹ quan mặt tiền, tránh dàn nóng lộ trên các tầng). Ống đồng mỗi phòng tính theo cao độ thực tế từ sàn phòng đến cao độ mái (17,1m) cộng hệ số đi ngang trên mái 6m/máy - phòng Tầng 1 cần ~23m ống đồng, phòng Tầng 5 chỉ cần ~9m. Tổng ống đồng toàn công trình 168,2m (thay vì 55m theo hệ số cố định 5m/máy trước đây). Phương án này giả định TẤT CẢ dàn nóng đặt tại 1 khu vực trên mái.\n" +
+    "A66 | Diện tích sơn tường trong (BOQ_V1.2 FIN-SON-020) nay trừ đi diện tích ốp gạch tường WC (M23×D29=165m²) vì khu vực đã ốp gạch không cần sơn - tránh trùng lặp chi phí hoàn thiện giữa 2 hạng mục Sơn và Gạch ốp WC.\n" +
+    "A68 | RÀ SOÁT ĐƠN GIÁ PHẦN THÔ theo phản hồi thực tế CĐT: Xây tường 100mm tính theo cấu thành chi phí cụ thể (gạch+vữa+nhân công+lợi nhuận 10%) thay vì đơn giá thị trường tham khảo chung chung - phản ánh đúng hơn chi phí thực tế thi công tại Phú Quốc. Tường 200mm khu ẩm ướt được loại bỏ hoàn toàn do bản vẽ cập nhật không còn thể hiện hạng mục này (toàn bộ tường ngăn nội bộ dùng thống nhất 100mm).\n" +
+    "A69 | Gói mua sắm khách sạn (OS&E - nệm/chăn/ga/gối/khăn) là ƯỚC TÍNH LUMP-SUM 8,5 triệu/phòng, CHƯA phải danh mục FF&E chi tiết. Cần bộ phận vận hành khách sạn (hoặc đơn vị F&B/Housekeeping) lập danh mục cụ thể theo tiêu chuẩn thương hiệu (số lượng bộ dự phòng, chất liệu, nhà cung cấp) trước khi mua sắm thực tế. Rèm cửa ước 4m/phòng (cửa sổ+cửa ban công).\n" +
+    "A70 | SỬA HỆ SỐ TƯỜNG NGĂN: hệ số 0,45 m/m² sàn ban đầu (tham khảo tổng quát) cho khối lượng tường quá lớn so với mặt bằng thực tế (mỗi tầng chỉ có 1-2 phòng, số vách ngăn không nhiều). Đã điều chỉnh xuống 0,26 m/m² sàn - ước tính dựa trên bố trí thực tế: 1 tường ngăn 2 phòng/tầng + vách ngăn WC trong từng phòng + vách hành lang. CẦN đối chiếu lại với bản vẽ mặt bằng kết cấu/tường ngăn chi tiết (nếu có) để xác nhận chính xác hệ số này.",
   "nha-pho":
     "N1 | Công trình tham chiếu: Nhà phố Lô M6, đường 36, An Khánh, Thủ Đức — 4 tầng (Trệt+3 lầu), footprint 8,73m × 8,9m.\n" +
     "N2 | Method luận: PHẦN THÔ (móng+khung+xây bao+MEP âm tường+chống thấm) tính theo đơn giá TRỌN GÓI đồng nhất/m² sàn (không tách xây/tô riêng như Shophouse) — mức tham khảo ~4.900.000đ/m² GFA (theo công thức GFA=dài×rộng×số tầng, KHÔNG nhân hệ số quy đổi móng/mái). Đây là mức tham khảo tại thời điểm lập, CẦN cập nhật theo biến động giá vật tư/nhân công thực tế khi áp dụng.\n" +
@@ -934,6 +989,21 @@ export default function QsEstimateApp() {
     setTimeout(() => setToast(null), 3200);
   }, []);
 
+  // SỬA LỖI THẬT (chẩn đoán từ triệu chứng mất tiền không rõ nguyên nhân): nếu
+  // trang bị tải lại/đóng giữa lúc đang chờ job PDF lớn, job đó vẫn chạy ngầm
+  // trên server (tốn tiền AI thật) nhưng không ai còn theo dõi được kết quả —
+  // cảnh báo NGAY khi mở lại app, không để âm thầm mất dấu lần nữa.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("qs_job_dang_cho");
+      if (!raw) return;
+      const { tenFile, luc } = JSON.parse(raw);
+      const phutTruoc = Math.round((Date.now() - luc) / 60000);
+      showToast(`⚠ Phát hiện 1 lần đọc "${tenFile}" bị ngắt giữa chừng (${phutTruoc} phút trước, do tải lại trang lúc đang chờ) — AI có thể đã xử lý xong và ĐÃ TỐN TIỀN, nhưng chưa lấy được kết quả. Không cần đọc lại ngay — báo cho người quản lý app kiểm tra trước khi đọc lại để tránh tốn tiền 2 lần.`, "warn");
+      localStorage.removeItem("qs_job_dang_cho");
+    } catch (e) {}
+  }, [showToast]);
+
   // ---- load/save (window.storage) ----
   useEffect(() => {
     (async () => {
@@ -1011,6 +1081,16 @@ export default function QsEstimateApp() {
     [boqItems, activeProjectId]
   );
 
+  // SỬA LỖI THẬT (phát hiện qua phản ánh người dùng): kết quả AI đọc được (chờ
+  // duyệt vào BOQ) trước đây KHÔNG lọc theo dự án — đọc bản vẽ dự án A xong
+  // chưa duyệt hết, chuyển sang dự án B, "Bước 2 — Duyệt khối lượng" vẫn hiện
+  // lẫn kết quả của dự án A, gây đúng cảm giác "không xoá được, phải thoát
+  // app". Lọc đúng theo dự án đang mở, giống cách projectBoq đã làm ở trên.
+  const projectAiResults = useMemo(
+    () => aiResults.filter((r) => r.projectId === activeProjectId),
+    [aiResults, activeProjectId]
+  );
+
   const projectNorms = useMemo(
     () => norms.filter((n) => (n.scope === "master" && n.groups.includes(activeProject?.groupId)) || (n.scope === "local" && n.projectId === activeProjectId)),
     [norms, activeProject, activeProjectId]
@@ -1059,7 +1139,14 @@ export default function QsEstimateApp() {
     return { VL, NC, May, truc_tiep, quanLy, khac, giaThanh, loiNhuan, giaBanTruocVAT, vat, giaBanSauVAT, phanTich, khoan };
   }, [includedBoqLines, activeProject]);
 
-  const hasData = includedBoqLines.length > 0 && totals.truc_tiep > 0;
+  // SỬA LỖI THẬT (phát hiện qua phản ánh người dùng): trước đây yêu cầu CẢ
+  // totals.truc_tiep > 0 — nếu AI đọc ra hạng mục CHƯA khớp định mức sẵn có,
+  // app tự tạo định mức mới với vt/nc/may RỖNG (giá 0đ, đúng thiết kế — không
+  // bịa giá) → truc_tiep = 0 DÙ ĐÃ CÓ DÒNG BOQ THẬT (đã duyệt đúng ở Bước 2) →
+  // hasData = false → toàn bộ tab "Xuất file"/Dashboard biến mất, người dùng
+  // tưởng app lỗi dù thực ra chỉ cần vào bổ sung giá. Giá 0đ vẫn LÀ dữ liệu —
+  // chỉ cần có dòng BOQ là đủ để hiển thị, không cần giá đã đầy đủ.
+  const hasData = includedBoqLines.length > 0;
 
   // ---- mutations ----
   const addProject = (name, groupId) => {
@@ -1076,7 +1163,7 @@ export default function QsEstimateApp() {
     const tpl = tenMauKhop ? boqTemplates[tenMauKhop] : null;
     if (tpl && tpl.items.length) {
       setBoqItems((prev) => [...prev, ...tpl.items.map((it) => ({ id: uid("boq"), projectId: id, included: true, ...it }))]);
-      showToast(`Đã tạo dự án "${name}" — có sẵn ${tpl.items.length} dòng dự toán mẫu từ "${tenMauKhop}", khối lượng tự tính theo diện tích khi chú nhập Thông số công trình.`);
+      showToast(`Đã tạo dự án "${name}" — có sẵn ${tpl.items.length} dòng dự toán mẫu từ "${tenMauKhop}", đọc bản vẽ để AI tự điền khối lượng thật.`);
     } else {
       showToast(`Đã tạo dự án "${name}" — chưa có mẫu dự toán cho nhóm này, thêm hạng mục thủ công.`);
     }
@@ -1120,7 +1207,7 @@ export default function QsEstimateApp() {
     setProjects((prev) => [...prev, { id, name: pName, groupId: tpl.groupId, createdAt: new Date().toISOString().slice(0, 10), ...(tpl.pcts || {}), ...(tpl.dims || {}) }]);
     setBoqItems((prev) => [...prev, ...tpl.items.map((it) => ({ id: uid("boq"), projectId: id, included: true, ...it }))]);
     setActiveProjectId(id);
-    showToast(`Đã tạo dự án "${pName}" từ mẫu "${tplName}" — ${tpl.items.length} dòng BOQ sẵn sàng, chỉ cần chỉnh Thông số công trình là khối lượng tự tính lại.`);
+    showToast(`Đã tạo dự án "${pName}" từ mẫu "${tplName}" — ${tpl.items.length} dòng BOQ sẵn sàng, đọc bản vẽ để AI tự điền khối lượng thật.`);
   };
   // ---- Tìm mẫu dự toán khớp đúng nhóm công trình của dự án đang chọn, lấy ra
   // danh sách TÊN đầu việc chuẩn — gửi kèm khi đọc bản vẽ để AI bám theo đúng
@@ -1322,6 +1409,26 @@ export default function QsEstimateApp() {
         reason: "Xoá tại thẻ Điều chỉnh dự toán/khối lượng",
       }, ...prev]);
     }
+  };
+  // THÊM MỚI (theo yêu cầu người dùng): xoá TOÀN BỘ khối lượng BOQ của dự án
+  // ĐANG MỞ trong 1 lần — trước đây muốn làm lại từ đầu phải xoá tay từng
+  // dòng, hoặc thoát app. Chỉ xoá đúng dự án hiện tại (không đụng dự án khác),
+  // và xoá luôn kết quả AI đọc được CHƯA duyệt của dự án này (nếu còn) để
+  // tránh tình trạng bản vẽ cũ vẫn "lởn vởn" chờ duyệt sau khi đã xoá BOQ.
+  const xoaToanBoBoqDuAn = () => {
+    if (activeProject?.khoaBoq) { showToast(`Dự án "${activeProject?.name}" đang KHOÁ — không xoá được. Mở khoá ở thẻ Dự án nếu thực sự cần.`, "error"); return; }
+    const soDong = projectBoq.length;
+    const soAiChoDuyet = projectAiResults.length;
+    if (!soDong && !soAiChoDuyet) { showToast("Dự án này chưa có khối lượng nào để xoá.", "warn"); return; }
+    if (!window.confirm(`Xoá TOÀN BỘ ${soDong} dòng khối lượng BOQ${soAiChoDuyet ? ` + ${soAiChoDuyet} dòng AI đang chờ duyệt` : ""} của dự án "${activeProject?.name}"?\n\nKhông thể hoàn tác — chỉ dùng khi thực sự muốn làm lại từ đầu.`)) return;
+    setBoqItems((prev) => prev.filter((b) => b.projectId !== activeProjectId));
+    setAiResults((prev) => prev.filter((r) => r.projectId !== activeProjectId));
+    setChangeLog((prev) => [{
+      id: uid("log"), when: new Date().toLocaleString("vi-VN"), who: authUser?.ten || "QS (chưa đăng nhập)",
+      what: `XOÁ TOÀN BỘ ${soDong} dòng BOQ của dự án (làm lại từ đầu)`,
+      reason: "Xoá hàng loạt tại thẻ Điều chỉnh dự toán/khối lượng",
+    }, ...prev]);
+    showToast(`Đã xoá toàn bộ ${soDong} dòng khối lượng của dự án "${activeProject?.name}" — có thể đọc bản vẽ mới ngay, không cần thoát app.`, "warn");
   };
   // Tạm loại 1 dòng khỏi tổng/BOQ xuất file mà KHÔNG xoá dữ liệu — ví dụ chỉ báo giá
   // gói Điện + Nước, các mục khác vẫn giữ nguyên số liệu, bật lại tick là tính ngay.
@@ -1553,7 +1660,6 @@ export default function QsEstimateApp() {
 
   const [pdfAiAnalyzing, setPdfAiAnalyzing] = useState(null); // id file PDF đang xử lý
   const [pdfAiProgress, setPdfAiProgress] = useState(0); // % tiến độ hiển thị cho người dùng
-  const [pdfAiStartedAt, setPdfAiStartedAt] = useState(null); // mốc bắt đầu đọc — dùng cho đồng hồ đếm giờ trên nút
 
   // Gửi thẳng file PDF cho AI đọc (Claude đọc PDF trực tiếp, không cần thư viện
   // ngoài / CDN nào cả — tránh lỗi mạng khi tải pdf.js). AI đọc toàn bộ các trang
@@ -1596,30 +1702,25 @@ export default function QsEstimateApp() {
   };
 
   const analyzePdfAI = async (pdfEntry, ghiChuThem) => {
-    // SỬA LỖI THẬT (chẩn đoán từ triệu chứng người dùng: "A7-14.pdf" 45.4MB/12
-    // trang bị CHẶN THẲNG ở đây trước khi kịp gửi lên server): trước đây coi cả
-    // file là 1 lần gửi duy nhất phải vừa trần 32MB base64 của API — đúng với
-    // hành vi CŨ, nhưng giờ server đã tự chia PDF theo DUNG LƯỢNG từng phần
-    // (xem chiaPdfLonNeuCanThiet/server.js — đệ quy chia đôi tới khi mỗi phần
-    // đủ nhỏ), y hệt cách đã làm cho PDF nhiều trang từ trước. Chặn cứng ở đây
-    // giờ chặn NHẦM cả những file server hoàn toàn xử lý được. Chỉ còn chặn ở
-    // mức thật vô lý (file lỗi/sai định dạng) — server sẽ tự báo lỗi rõ ràng
-    // nếu có 1 TRANG ĐƠN LẺ vẫn vượt trần dù đã chia tới mức nhỏ nhất.
-    const HARD_MAX = 80 * 1024 * 1024; // khớp với giới hạn body 110mb phía server (base64 hoá phình ~33%)
+    // Trần THẬT của Anthropic API là 32MB cho TOÀN BỘ dữ liệu request — nhưng dữ
+    // liệu phải mã hoá base64 trước khi gửi, làm phình to thêm ~33%. Giới hạn file
+    // GỐC dưới đây đã tính trừ hao phần phình đó + chừa dư cho phần JSON/prompt,
+    // để không bao giờ vượt trần thật (nguồn: platform.claude.com/docs — Vision).
+    const HARD_MAX = 40 * 1024 * 1024; // SỬA LỖI THẬT: tăng từ 22MB — giờ đã có Files API (server tự upload file lớn, né trần 32MB của Anthropic) + express.json đã tăng lên 60mb, 22MB cũ là điểm nghẽn không cần thiết nữa. 40MB base64 hoá ~54.8MB, an toàn dưới trần 60mb.
     const SOFT_MAX = 10 * 1024 * 1024; // trên mức này chỉ cảnh báo, vẫn cho gửi bình thường
     if (pdfEntry.size > HARD_MAX) {
-      const msg = `File "${pdfEntry.name}" nặng ${(pdfEntry.size / 1e6).toFixed(1)} MB — quá lớn bất thường cho 1 bản vẽ PDF, khả năng cao file bị lỗi/sai định dạng khi xuất. Kiểm tra lại file gốc.`;
+      const maxMB = Math.round(HARD_MAX / 1e6);
+      const msg = `File "${pdfEntry.name}" nặng ${(pdfEntry.size / 1e6).toFixed(1)} MB — vượt giới hạn ${maxMB}MB hiện tại của app. Cách xử lý: (1) tách PDF thành các phần nhỏ hơn (mỗi phần vài trang), đọc từng phần rồi gộp kết quả; hoặc (2) giảm chất lượng quét/DPI khi xuất PDF — file nặng hơn do quét độ phân giải quá cao KHÔNG giúp AI đọc chính xác hơn, vì hệ thống tự chuẩn hoá ảnh về độ phân giải chuẩn trước khi đọc bất kể file gốc nặng nhẹ.`;
       setAiError(msg);
       showToast(msg, "error");
       return;
     }
     if (pdfEntry.size > SOFT_MAX) {
-      showToast(`File nặng ${(pdfEntry.size / 1e6).toFixed(1)} MB — server sẽ tự chia nhỏ theo dung lượng để đọc, có thể mất lâu hơn bình thường. Nếu lỗi mạng giữa chừng, cứ thử lại — đã có xử lý nền + timeout tự động.`, "warn");
+      showToast(`File nặng ${(pdfEntry.size / 1e6).toFixed(1)} MB — AI có thể mất lâu hơn bình thường để đọc hết, chờ chút nhé. Nếu lỗi mạng giữa chừng, thử nén nhỏ lại hoặc tách bớt trang rồi gửi lại.`, "warn");
     }
     setPdfAiAnalyzing(pdfEntry.id);
     setAiError(null);
     setPdfAiProgress(2);
-    setPdfAiStartedAt(Date.now());
     const tick = setInterval(() => {
       setPdfAiProgress((p) => (p < 90 ? p + Math.max(1, Math.round((90 - p) * 0.1)) : p));
     }, 350);
@@ -1645,20 +1746,14 @@ export default function QsEstimateApp() {
         // ---- Chế độ backend riêng (ổn định — dùng khi đã có hosting) ----
         let response;
         try {
-          // SỬA: 30s cố định SAI cho file lớn — request này giờ vẫn phải tải
-          // LÊN toàn bộ base64 (có thể ~100MB cho file gốc 80MB) trước khi
-          // server kịp tạo job, bất kể server xử lý AI nhanh hay chậm. Trên
-          // mạng di động chậm, riêng việc TẢI LÊN đã có thể mất vài phút — cố
-          // định 30s sẽ tự huỷ nhầm ngay giữa lúc đang tải lên bình thường.
-          // Ước lượng theo dung lượng thật: tối thiểu 30s, cộng thêm cho mỗi
-          // MB base64 (giả định tốc độ mạng di động chậm ~1MB/s là hợp lý để
-          // không huỷ nhầm, vẫn có trần trên để không chờ vô hạn nếu treo thật).
-          const timeoutTaiLen = Math.min(300000, Math.max(30000, Math.ceil((base64.length / 1e6) * 1000) + 20000));
+          // Timeout 30s — giờ endpoint này CHỈ tạo job rồi trả về ngay (không
+          // còn chờ AI xử lý xong mới trả lời), nên phải rất nhanh; treo lâu
+          // hơn 30s gần như chắc chắn là mạng rớt, không phải đang xử lý.
           response = await fetchCoTimeout(`${BACKEND_URL}/api/analyze-pdf`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-user-id": getUserId(), ...authHeaders() },
             body: JSON.stringify({ base64, ghiChuThem, name: pdfEntry.name, danhSachChuan: mauChuanPdf.danhSach, tenCam: activeProject?.tenCam, tenUuTien: activeProject?.tenUuTien, duToanMauThamChieu: layDuToanMauThamChieu(activeProject) }),
-          }, timeoutTaiLen);
+          }, 30000);
         } catch (netErr) {
           throw new Error(`Không gọi được backend riêng (${netErr.message}). Kiểm tra lại địa chỉ BACKEND_URL trong code và server có đang chạy không.`);
         }
@@ -1672,9 +1767,26 @@ export default function QsEstimateApp() {
         if (data.jobId && !Array.isArray(data.items)) {
           setLastRawDebug(data.ghiChu || `PDF lớn (${data.tongSoTrang} trang) — đang xử lý nền, vui lòng đợi...`);
           const jobId = data.jobId;
+          // SỬA LỖI THẬT (nguyên nhân khả năng cao của tiền mất mà không ra kết
+          // quả): jobId trước đây CHỈ tồn tại trong biến tạm — nếu chú refresh/
+          // đóng tab giữa lúc đang chờ (đã làm nhiều lần khi debug), job vẫn
+          // CHẠY NGẦM TRÊN SERVER (không bị huỷ, tốn tiền AI thật), nhưng KHÔNG
+          // AI CÒN THEO DÕI ĐƯỢC KẾT QUẢ nữa — bấm đọc lại sẽ tạo job MỚI, cả 2
+          // job cùng tốn tiền. Lưu jobId vào localStorage để có thể phát hiện.
+          try { localStorage.setItem("qs_job_dang_cho", JSON.stringify({ jobId, tenFile: pdfEntry.name, luc: Date.now() })); } catch (e) {}
           let trangThaiTong = "dang_chay";
           let soVongCho = 0;
-          while (trangThaiTong === "dang_chay" && soVongCho < 1200) { // tối đa ~1200×3s = 60 phút chờ — đủ dư so với trần server (2 lần thử x 20 phút = tối đa 40 phút/lô)
+          // SỬA LỖI THẬT (tính toán từ số liệu thật): với SO_LAN_THU_LO=2 (server)
+          // × timeout AI 180s/lần, 1 lô tệ nhất tốn ~6.1 phút; các lô xử lý TUẦN
+          // TỰ (không song song) — file nhiều lô (VD 7 lô, PDF ~84 trang) có thể
+          // cần thật sự tới ~43 phút. Trần cũ 10 phút khiến app "bỏ cuộc" trong
+          // khi server (Job Queue, bền vững nhờ Postgres) vẫn đang chạy tiếp —
+          // đúng nguyên nhân "treo, không trả khối lượng". Tăng lên 45 phút.
+          // SỬA LỖI THẬT: tăng theo AI_TIMEOUT_MS mới (180s -> 1200s/20 phút ở
+          // server) — với 2 lần thử lại, 1 lô tệ nhất giờ có thể cần tới 40
+          // phút (trước đây chỉ ~6 phút). Trần cũ 45 phút không đủ cho file
+          // nhiều lô nữa — tăng lên 120 phút (đủ cho ~3 lô tệ nhất liên tiếp).
+          while (trangThaiTong === "dang_chay" && soVongCho < 2400) { // tối đa ~2400×3s = 120 phút chờ
             await new Promise((r) => setTimeout(r, 3000));
             soVongCho++;
             let resStatus;
@@ -1694,11 +1806,20 @@ export default function QsEstimateApp() {
             setAiProgress(Math.min(95, dataStatus.phanTramXong || 0));
             setLastRawDebug(`PDF lớn — đang xử lý nền: ${dataStatus.soLoXong}/${dataStatus.tongSoLo} phần xong (${dataStatus.phanTramXong}%)${dataStatus.soLoLoi ? `, ${dataStatus.soLoLoi} phần lỗi` : ""}.`);
           }
-          if (trangThaiTong === "dang_chay") throw new Error("PDF lớn xử lý quá lâu (>60 phút) — có thể server đang quá tải, thử lại sau.");
+          try { localStorage.removeItem("qs_job_dang_cho"); } catch (e) {} // xong (dù đúng hạn hay hết 45 phút) — xoá dấu vết chờ
+          if (trangThaiTong === "dang_chay") throw new Error("PDF lớn xử lý quá lâu (>120 phút) — có thể server đang quá tải hoặc file quá nhiều trang, thử tách nhỏ file rồi đọc từng phần.");
           const resResult = await fetchCoTimeout(`${BACKEND_URL}/api/jobs/${jobId}/result`, { headers: { "x-user-id": getUserId(), ...authHeaders() } }, 20000);
           const dataResult = await resResult.json().catch(() => null);
           if (!resResult.ok || !dataResult) throw new Error(dataResult?.error || "Không lấy được kết quả job PDF lớn.");
           data = dataResult; // dùng kết quả thật thay cho response ban đầu (chỉ có jobId)
+          // SỬA LỖI THẬT (phát hiện khi thêm hiển thị chi phí): dataResult chỉ có
+          // tongChiPhiUsd (số thô, từ job PDF/ảnh nền) — KHÁC với "cost: {usd,vnd}"
+          // mà các đường phân tích trực tiếp trả về. Gọi ghiNhanChiPhi(data.cost) ở
+          // dòng dưới với data=dataResult sẽ luôn là undefined (bị chặn ngay bởi
+          // "if (!cost) return"), khiến chi phí đọc PDF/qua job nền CHƯA TỪNG được
+          // ghi nhận dù hàm đã được gọi. Gắn thêm field "cost" đúng định dạng ngay
+          // tại đây để dòng ghiNhanChiPhi(data.cost) phía dưới hoạt động đúng.
+          if (Number.isFinite(dataResult.tongChiPhiUsd)) data.cost = { usd: dataResult.tongChiPhiUsd, vnd: Math.round(dataResult.tongChiPhiUsd * 26000) };
         }
         const parsedTho = Array.isArray(data) ? data : (Array.isArray(data.items) ? data.items : []);
         parsed = parsedTho.filter((it) => !it?.laCanhBao);
@@ -1753,7 +1874,7 @@ export default function QsEstimateApp() {
             ? { normId: normIdTheoMau, score: 1, goiYNormId: normIdTheoMau, tuXacNhan: true, lyDoKhongTuXacNhan: "" }
             : timDinhMucPhuHopDaTieuChi(p.name || "", p.unit || "", activeProject?.groupId || "", projectNorms);
           return {
-            key: uid("air"),
+            key: uid("air"), projectId: activeProjectId,
             name: p.name || "Hạng mục chưa đặt tên",
             unit: p.unit || "",
             qty: Number(p.qty) || 0,
@@ -1767,8 +1888,14 @@ export default function QsEstimateApp() {
             model: modelDaDung,
           };
         });
-        setAiResults((prev) => [...prev, ...ganhDauNghiTrung(withMatch)]);
-        showToast(`AI đọc được ${parsed.length} hạng mục từ "${pdfEntry.name}"${ghiChuThem ? " (đã đọc theo yêu cầu bổ sung)" : ""} — kiểm tra khớp định mức rồi mới thêm vào BOQ.`, "warn");
+        const moiDoc0 = ganhDauNghiTrung(withMatch);
+        setAiResults((prev) => [...prev, ...moiDoc0]);
+        // SỬA THEO YÊU CẦU: tự động đưa thẳng vào BOQ ngay sau khi đọc xong —
+        // bỏ hẳn bước phải bấm "Duyệt tất cả" tay, giống hệt cách chat Claude
+        // thường (gửi bản vẽ + mẫu, nhận thẳng kết quả cuối, không có bước
+        // duyệt tay ở giữa).
+        apDungDanhSachVaoBoq(moiDoc0);
+        showToast(`AI đọc được ${parsed.length} hạng mục từ "${pdfEntry.name}"${ghiChuThem ? " (đã đọc theo yêu cầu bổ sung)" : ""} — đã tự động thêm vào BOQ, kiểm tra lại khối lượng/giá ở thẻ "Điều chỉnh dự toán/khối lượng".`, "warn");
       } else {
         showToast(`File "${pdfEntry.name}" không có bảng số liệu rõ ràng để AI đọc khối lượng.`, "warn");
       }
@@ -1779,7 +1906,6 @@ export default function QsEstimateApp() {
     } finally {
       clearInterval(tick);
       setPdfAiAnalyzing(null);
-      setPdfAiStartedAt(null);
       setTimeout(() => setPdfAiProgress(0), 700);
     }
   };
@@ -2214,7 +2340,7 @@ export default function QsEstimateApp() {
             ? { normId: normIdTheoMau, score: 1, goiYNormId: normIdTheoMau, tuXacNhan: true, lyDoKhongTuXacNhan: "" }
             : timDinhMucPhuHopDaTieuChi(p.name || "", p.unit || "", activeProject?.groupId || "", projectNorms);
           return {
-            key: uid("air"),
+            key: uid("air"), projectId: activeProjectId,
             name: p.name || "Hạng mục chưa đặt tên",
             unit: p.unit || "",
             qty: Number(p.qty) || 0,
@@ -2228,8 +2354,12 @@ export default function QsEstimateApp() {
             model: modelDaDung,
           };
         });
-        setAiResults((prev) => [...prev, ...ganhDauNghiTrung(withMatch)]);
-        showToast(`AI đọc được ${parsed.length} hạng mục từ "${photo.name}"${ghiChuThem ? " (đã đọc theo yêu cầu bổ sung)" : ""} — kiểm tra khớp định mức rồi mới thêm vào BOQ (không thay thế bóc tách chuyên môn).`, "warn");
+        const moiDoc1 = ganhDauNghiTrung(withMatch);
+        setAiResults((prev) => [...prev, ...moiDoc1]);
+        // SỬA THEO YÊU CẦU: tự động đưa thẳng vào BOQ — xem giải thích đầy đủ
+        // ở lần dùng đầu tiên của mẫu này (analyzePdfAI) phía trên.
+        apDungDanhSachVaoBoq(moiDoc1);
+        showToast(`AI đọc được ${parsed.length} hạng mục từ "${photo.name}"${ghiChuThem ? " (đã đọc theo yêu cầu bổ sung)" : ""} — đã tự động thêm vào BOQ (không thay thế bóc tách chuyên môn, cần kiểm tra lại).`, "warn");
       } else {
         showToast(`Ảnh "${photo.name}" không có bảng số liệu rõ ràng để AI đọc khối lượng.`, "warn");
       }
@@ -2299,14 +2429,18 @@ export default function QsEstimateApp() {
           const idx = Number(p.source_image_index);
           const dungNguon = Number.isInteger(idx) && idx >= 1 && idx <= tenTheoAnh.length ? tenTheoAnh[idx - 1] : null;
           return {
-            key: uid("air"), name: p.name || "Hạng mục chưa đặt tên", unit: p.unit || "", qty: Number(p.qty) || 0, note: p.note || "",
+            key: uid("air"), projectId: activeProjectId, name: p.name || "Hạng mục chưa đặt tên", unit: p.unit || "", qty: Number(p.qty) || 0, note: p.note || "",
             category: NHOM_TU_AI[p.group] || "cat-hoanthien", sourcePhoto: dungNguon || tenGop,
             nguonKhongRoRang: !dungNguon, // đánh dấu để hiện cảnh báo nếu AI không trả đúng chỉ số ảnh
             matchedNormId: match.normId, matchScore: match.score, goiYNormId: match.goiYNormId, lyDoKhongTuXacNhan: match.lyDoKhongTuXacNhan, model: data.model || null,
           };
         });
-        setAiResults((prev) => [...prev, ...ganhDauNghiTrung(withMatch)]);
-        showToast(`AI đọc gộp ${danhSachAnh.length} ảnh cùng lúc, đối chiếu chéo giữa các trang — ra ${parsed.length} hạng mục. Kéo xuống "Bước 2" để duyệt.`);
+        const moiDoc2 = ganhDauNghiTrung(withMatch);
+        setAiResults((prev) => [...prev, ...moiDoc2]);
+        // SỬA THEO YÊU CẦU: tự động đưa thẳng vào BOQ — xem giải thích đầy đủ
+        // ở lần dùng đầu tiên của mẫu này (analyzePdfAI) phía trên.
+        apDungDanhSachVaoBoq(moiDoc2);
+        showToast(`AI đọc gộp ${danhSachAnh.length} ảnh cùng lúc, đối chiếu chéo giữa các trang — ra ${parsed.length} hạng mục, đã tự động thêm vào BOQ.`);
       } else {
         showToast(`AI đã đọc gộp ${danhSachAnh.length} ảnh nhưng không trích được hạng mục nào.`, "warn");
       }
@@ -2350,18 +2484,24 @@ export default function QsEstimateApp() {
   // vào thẻ "Dự án" bổ sung đơn giá thật cho các định mức mới này.
   // Mỗi dòng gắn trạng thái CONFIRMED (khớp mẫu, đã có giá) hoặc REVIEW (mới tạo,
   // cần chú tự kiểm tra) — để biết ngay dòng nào tin được, dòng nào phải xem lại.
-  const applyAllAiResults = () => {
-    if (activeProject?.khoaBoq) { showToast(`Dự án đang KHOÁ — không thêm được dòng mới vào BOQ. Mở khoá ở thẻ Dự án nếu cần.`, "error"); return; }
-    if (!aiResults.length) return;
+  // SỬA THEO YÊU CẦU (bỏ bước duyệt tay — giống cách chat Claude thường: gửi
+  // bản vẽ + mẫu, nhận thẳng kết quả cuối, không có bước duyệt tay ở giữa):
+  // tách phần "áp kết quả vào BOQ" thành hàm dùng lại được, NHẬN THẲNG mảng
+  // kết quả làm tham số — thay vì chỉ đọc từ state "aiResults" (vốn cập nhật
+  // BẤT ĐỒNG BỘ, không dùng ngay lập tức được sau khi vừa setAiResults). Nhờ
+  // vậy có thể gọi NGAY sau khi đọc xong (tự động), không cần người bấm nữa.
+  const apDungDanhSachVaoBoq = (danhSach, { imLang } = {}) => {
+    if (activeProject?.khoaBoq) { if (!imLang) showToast(`Dự án đang KHOÁ — không thêm được dòng mới vào BOQ. Mở khoá ở thẻ Dự án nếu cần.`, "error"); return 0; }
+    if (!danhSach || !danhSach.length) return 0;
     let soTaoMoi = 0;
-    const newBoqItems = aiResults.map((r) => {
+    const newBoqItems = danhSach.map((r) => {
       let normId = r.matchedNormId;
       let trangThai = "confirmed";
       if (!normId) {
         normId = addNorm(
           { code: uid("AI").toUpperCase(), name: r.name, unit: r.unit || "-", standard: "", groups: [activeProject?.groupId], vt: [], nc: [], may: [] },
           "local",
-          `Tự tạo khi duyệt hàng loạt từ AI đọc bản vẽ "${r.sourcePhoto}" — CHƯA CÓ GIÁ, cần bổ sung đơn giá vật tư/nhân công thật.`,
+          `Tự tạo khi AI đọc bản vẽ "${r.sourcePhoto}" — CHƯA CÓ GIÁ, cần bổ sung đơn giá vật tư/nhân công thật.`,
           true
         );
         soTaoMoi++;
@@ -2370,13 +2510,24 @@ export default function QsEstimateApp() {
       return { id: uid("boq"), projectId: activeProjectId, normId, qty: r.qty, khoanPrice: null, included: true, category: r.category || "cat-hoanthien", ghiChu: r.note || "", trangThai, sourcePhoto: r.sourcePhoto || "", model: r.model || null, ngayDoc: new Date().toISOString(), evidence_region: r.evidence_region || null, confidenceMatrix: r.confidenceMatrix || null };
     });
     setBoqItems((prev) => [...prev, ...newBoqItems]);
-    const tongSo = aiResults.length;
-    setAiResults([]);
-    showToast(
-      `Đã duyệt & thêm ${tongSo} dòng vào BOQ` +
-      (soTaoMoi > 0 ? ` (trong đó ${soTaoMoi} dòng chưa có định mức sẵn — đã tự tạo định mức mới, GIÁ ĐANG LÀ 0Đ, vào thẻ "Dự án → Định mức" bổ sung giá thật trước khi xuất báo giá chính thức).` : "."),
-      soTaoMoi > 0 ? "warn" : "ok"
-    );
+    if (!imLang) {
+      showToast(
+        `Đã tự động thêm ${danhSach.length} dòng vào BOQ` +
+        (soTaoMoi > 0 ? ` (trong đó ${soTaoMoi} dòng chưa có định mức sẵn — GIÁ ĐANG LÀ 0Đ, vào thẻ "Dự án → Định mức" bổ sung giá thật trước khi xuất báo giá chính thức).` : "."),
+        soTaoMoi > 0 ? "warn" : "ok"
+      );
+    }
+    return danhSach.length;
+  };
+
+  const applyAllAiResults = () => {
+    // SỬA THEO YÊU CẦU: kết quả giờ đã TỰ ĐỘNG vào BOQ ngay lúc đọc xong (xem
+    // apDungDanhSachVaoBoq gọi ngay sau setAiResults ở các hàm đọc PDF/ảnh) —
+    // nút này giờ chỉ còn tác dụng "đã xem xong, ẩn danh sách đi", KHÔNG được
+    // thêm lại lần nữa (nếu thêm lại sẽ tạo trùng dòng BOQ, vì bản ghi gốc đã
+    // được thêm tự động từ trước rồi). Chỉ ẩn đúng phần của dự án đang mở,
+    // giữ nguyên kết quả chờ xem của dự án khác (nếu có).
+    setAiResults((prev) => prev.filter((r) => r.projectId !== activeProjectId));
   };
 
   // ---- Xuất PDF THẬT — dùng pdf-lib (không phải chỉ "In" trình duyệt như trước).
@@ -2536,6 +2687,32 @@ export default function QsEstimateApp() {
   };
 
   const exportExcelThat = (XLSX) => {
+    // THÊM MỚI (theo yêu cầu chú: xuất đủ các sheet có trong R1-25): phân loại
+    // TỪNG dòng BOQ vào đúng 1 trong 9 phase chuẩn công ty (BOQ_V1.1→V4.1),
+    // gán đúng mã Cost Code — đọc trực tiếp từ cấu trúc thật của file mẫu
+    // R1-25 (WBS-CostCode + tên từng sheet BOQ_V*), không tự bịa quy tắc.
+    const PHASE_DINH_NGHIA = [
+      { sheet: "BOQ_V1.1", tieuDe: "BOQ_V1.1 - PHẦN THÔ: XÂY - TÔ - CHỐNG THẤM - CÁN NỀN", tuKhoa: /xây\s*tường|tô\s*trát|trát\s*tường|chống\s*thấm|cán\s*nền/i, maGoc: "MAS" },
+      { sheet: "BOQ_V1.2", tieuDe: "BOQ_V1.2 - HOÀN THIỆN: SƠN - TRẦN THẠCH CAO - GẠCH ĐÁ ỐP LÁT", tuKhoa: /sơn|trần\s*thạch\s*cao|gạch|đá\s*ốp|ốp\s*lát|lát\s*nền/i, maGoc: "FIN" },
+      { sheet: "BOQ_V2.0", tieuDe: "BOQ_V2.0 - ĐIỆN NHẸ & ĐỘNG LỰC", tuKhoa: /đèn|chiếu\s*sáng|ổ\s*cắm|công\s*tắc|dây\s*dẫn|dây\s*điện|tủ\s*điện|mạch\s*động\s*lực/i, maGoc: "ELE" },
+      { sheet: "BOQ_V2.1", tieuDe: "BOQ_V2.1 - MEP: CẤP NƯỚC - THOÁT NƯỚC", tuKhoa: /cấp\s*nước|thoát\s*nước|ống\s*ppr|ống\s*pvc|bồn\s*nước|máy\s*bơm/i, maGoc: "PLB" },
+      { sheet: "BOQ_V2.2", tieuDe: "BOQ_V2.2 - HVAC: MÁY LẠNH - ỐNG ĐỒNG - BẢO ÔN", tuKhoa: /máy\s*lạnh|điều\s*hòa|ống\s*đồng|bảo\s*ôn|hvac/i, maGoc: "HVAC" },
+      { sheet: "BOQ_V3.0", tieuDe: "BOQ_V3.0 - NỘI THẤT: GIƯỜNG - TỦ - BÀN - PANTRY", tuKhoa: /giường|tủ\s|bàn\s|pantry|nội\s*thất|mdf/i, maGoc: "FUR" },
+      { sheet: "BOQ_V3.1", tieuDe: "BOQ_V3.1 - THIẾT BỊ VỆ SINH: LAVABO - BỒN CẦU - SEN", tuKhoa: /lavabo|bồn\s*cầu|sen\s*vòi|thiết\s*bị\s*vệ\s*sinh|gương\s*wc/i, maGoc: "SAN" },
+      { sheet: "BOQ_V4.0", tieuDe: "BOQ_V4.0 - PCCC TRỌN GÓI", tuKhoa: /pccc|báo\s*cháy|chữa\s*cháy|bình\s*chữa\s*cháy/i, maGoc: "PCCC" },
+      { sheet: "BOQ_V4.1", tieuDe: "BOQ_V4.1 - THANG MÁY", tuKhoa: /thang\s*máy/i, maGoc: "TM" },
+    ];
+    // Nhóm "group" hiện có (mong/khung/hoanthien/mep) chỉ dùng làm gợi ý phụ khi
+    // từ khoá tên không khớp phase nào — ưu tiên từ khoá tên trước vì chính xác hơn.
+    function phanLoaiPhase(norm) {
+      const ten = norm?.name || "";
+      const match = PHASE_DINH_NGHIA.find((p) => p.tuKhoa.test(ten));
+      if (match) return match;
+      // Không khớp từ khoá nào — xếp tạm theo group thô, đánh dấu rõ để QS tự xác nhận lại
+      if (norm?.group === "mep") return PHASE_DINH_NGHIA[2]; // tạm về ELE, phổ biến nhất trong mep
+      return PHASE_DINH_NGHIA[0]; // mặc định V1.1 (phần thô) — nhóm rộng nhất, ít rủi ro nhất khi đoán sai
+    }
+
     const usedMatIds = new Set();
     const usedLaborIds = new Set();
     includedBoqLines.forEach(({ norm }) => {
@@ -2667,12 +2844,44 @@ export default function QsEstimateApp() {
     wsBoq["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: totalRow, c: 8 } });
     wsBoq["!cols"] = [{ wch: 36 }, { wch: 8 }, { wch: 12 }, { wch: 16 }, { wch: 18 }, { wch: 14 }, { wch: 18 }, { wch: 12 }, { wch: 22 }];
 
+    // THÊM MỚI (theo yêu cầu chú: xuất đủ các sheet có trong R1-25) — 9 sheet
+    // BOQ_V1.1→V4.1 theo đúng form công ty (STT | Cost Code | Mô tả | ĐVT | KL
+    // | Đơn giá | Thành tiền | Spec | Ghi chú). Đây là BẢN TRÌNH BÀY LẠI cùng
+    // dữ liệu includedBoqLines, KHÔNG tính toán lại gì — nguồn số liệu THẬT
+    // vẫn là sheet "BOQ"/"TongHop_DuToan" phía trên (đã có công thức liên kết,
+    // đã test kỹ) để tránh 2 nơi tính ra 2 số khác nhau.
+    const wsBoqPhaseMap = {};
+    PHASE_DINH_NGHIA.forEach((p) => {
+      const linesCuaPhase = includedBoqLines.filter(({ norm }) => phanLoaiPhase(norm).sheet === p.sheet);
+      const aoa = [
+        [p.tieuDe],
+        [`Dự án: ${activeProject.name} — xuất tự động từ khối lượng đã duyệt`],
+        ["STT", "Cost Code", "Mô tả công tác", "ĐVT", "Khối lượng", "Đơn giá (VNĐ)", "Thành tiền (VNĐ)", "Spec", "Ghi chú"],
+      ];
+      let stt = 1, tongPhase = 0;
+      linesCuaPhase.forEach(({ boq, norm, calc }) => {
+        const donGia = Number(calc.donGiaKhoan) || normTotalValue[norm.id] || 0;
+        const thanhTien = boq.qty * donGia;
+        tongPhase += thanhTien;
+        aoa.push([stt++, `${p.maGoc}-${String(stt).padStart(3, "0")}`, norm.name, norm.unit, boq.qty, donGia, thanhTien, norm.standard || "", boq.ghiChu || ""]);
+      });
+      aoa.push(["", "", "TỔNG " + p.sheet, "", "", "", tongPhase, "", ""]);
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws["!cols"] = [{ wch: 5 }, { wch: 14 }, { wch: 36 }, { wch: 6 }, { wch: 10 }, { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 24 }];
+      wsBoqPhaseMap[p.sheet] = ws;
+    });
+
     // Sheet 4: Dự toán tổng hợp — có thêm lớp "Dự phòng" theo đúng công thức
     // A→B→C→D trong đặc tả chuẩn (mục 10): (A) trực tiếp -> (B) dự phòng ->
     // (C) sau dự phòng -> (D) VAT -> tổng. Đặt dự phòng giữa "Giá thành" và
     // "Lợi nhuận" — sau khi đã cộng quản lý+khác, trước khi cộng lợi nhuận.
-    const duPhongKL = activeProject.duPhongKLPct ?? 0.05;
-    const duPhongTruotGia = activeProject.duPhongTruotGiaPct ?? 0.03;
+    // THEO YÊU CẦU: bỏ 2 khoản dự phòng này — không còn ý nghĩa khi khối lượng
+    // đã lấy trực tiếp từ AI đọc bản vẽ thật (không phải ước lượng theo tỷ lệ
+    // nữa). Đặt về 0 (không phải giữ mặc định 5%/3% cũ) để không còn âm thầm
+    // cộng thêm vào giá — nếu cần điều chỉnh giá, dùng mẫu dự toán tham chiếu
+    // mới thay vì % cài đặt nhỏ lẻ này.
+    const duPhongKL = activeProject.duPhongKLPct ?? 0;
+    const duPhongTruotGia = activeProject.duPhongTruotGiaPct ?? 0;
     const wsDuToan = XLSX.utils.aoa_to_sheet([
       ["DỰ TOÁN TỔNG HỢP", activeProject.name],
       [activeVendorId !== "internal" ? `Đơn giá theo báo giá nhà thầu: ${activeVendorName}` : "Đơn giá nội bộ (chưa chọn nhà thầu ngoài)"],
@@ -2904,12 +3113,14 @@ export default function QsEstimateApp() {
 
     XLSX.utils.book_append_sheet(wb, wsHuongDanIn, "HuongDanIn");
     XLSX.utils.book_append_sheet(wb, wsDashboard, "Dashboard");
-    XLSX.utils.book_append_sheet(wb, wsDuToan, "DuToanTongHop");
+    XLSX.utils.book_append_sheet(wb, wsDuToan, "TongHop_DuToan");
     XLSX.utils.book_append_sheet(wb, wsBoq, "BOQ");
+    // THÊM MỚI (theo yêu cầu chú): 9 sheet BOQ_V1.1→V4.1 đúng tên/thứ tự file mẫu R1-25
+    PHASE_DINH_NGHIA.forEach((p) => XLSX.utils.book_append_sheet(wb, wsBoqPhaseMap[p.sheet], p.sheet));
     XLSX.utils.book_append_sheet(wb, wsPhanTich, "PhanTich");
     XLSX.utils.book_append_sheet(wb, wsDonGia, "DonGia");
     XLSX.utils.book_append_sheet(wb, wsQc, "QC");
-    XLSX.utils.book_append_sheet(wb, wsRevision, "Revision");
+    XLSX.utils.book_append_sheet(wb, wsRevision, "Revision History");
     if (wsTongHopTang) XLSX.utils.book_append_sheet(wb, wsTongHopTang, "TongHopTheoTang");
 
     // Sheet WBS-CostCode — KHÔNG chờ công ty chốt quy tắc mã hoá chính thức nữa.
@@ -3096,7 +3307,7 @@ export default function QsEstimateApp() {
           <div className="text-xs flex items-center gap-1.5" style={{ color: "#9FB2C4" }}>
             {saveState === "saving" && <><Save size={12} className="animate-pulse" /> Đang lưu…</>}
             {saveState === "saved" && <><CheckCircle2 size={12} color={GREEN} /> Đã lưu</>}
-            {saveState === "error" && <><AlertTriangle size={12} color={RED} /> Lỗi lưu{typeof window !== "undefined" && window.__qsLastSaveError ? `: ${window.__qsLastSaveError}` : ""}</>}
+            {saveState === "error" && <><AlertTriangle size={12} color={RED} /> Lỗi lưu</>}
           </div>
           {authUser?.coPhanQuyen && (
             <div className="text-xs flex items-center gap-2" style={{ color: "#9FB2C4" }}>
@@ -3174,10 +3385,11 @@ export default function QsEstimateApp() {
         {activeTab === "drawings" && (
           <DrawingsTab
             versions={projectVersions} photos={projectPhotos} addDrawingVersion={addDrawingVersion} handlePhotoFiles={handlePhotoFiles}
-            analyzePhotoAI={analyzePhotoAI} analyzePhotosBatchAI={analyzePhotosBatchAI} aiAnalyzing={aiAnalyzing} aiProgress={aiProgress} aiError={aiError} aiResults={aiResults} lastRawDebug={lastRawDebug} lastPipelineTrace={lastPipelineTrace} lastDrawingModel={lastDrawingModel} applyAiResult={applyAiResult} skipAiResult={skipAiResult} applyAllAiResults={applyAllAiResults}
+            analyzePhotoAI={analyzePhotoAI} analyzePhotosBatchAI={analyzePhotosBatchAI} aiAnalyzing={aiAnalyzing} aiProgress={aiProgress} aiError={aiError} aiResults={projectAiResults} lastRawDebug={lastRawDebug} lastPipelineTrace={lastPipelineTrace} lastDrawingModel={lastDrawingModel} applyAiResult={applyAiResult} skipAiResult={skipAiResult} applyAllAiResults={applyAllAiResults}
+            projects={projects} activeProjectId={activeProjectId} setActiveProjectId={setActiveProjectId}
             projectNorms={projectNorms}
             drawingFiles={projectDrawingFiles} handleDrawingFiles={handleDrawingFiles} removeDrawingFile={removeDrawingFile} removePhoto={removePhoto} removeAllPhotos={removeAllPhotos}
-            analyzePdfAI={analyzePdfAI} pdfAiAnalyzing={pdfAiAnalyzing} pdfAiProgress={pdfAiProgress} pdfAiStartedAt={pdfAiStartedAt}
+            analyzePdfAI={analyzePdfAI} pdfAiAnalyzing={pdfAiAnalyzing} pdfAiProgress={pdfAiProgress}
             docFileDxf={docFileDxf}
             boqLines={boqLines} activeProject={activeProject} setActiveTab={setActiveTab} aiCostLast={aiCostLast} aiCostTotal={aiCostTotal} testBackend={testBackend} connTest={connTest} connTesting={connTesting} authUser={authUser} authHeaders={authHeaders}
             danhSachChuanInfo={layDanhSachChuanTheoNhom()}
@@ -3191,6 +3403,7 @@ export default function QsEstimateApp() {
         {activeTab === "adjust" && (
           <AdjustTab
             boqLines={boqLines} projectNorms={projectNorms} addBoqItem={addBoqItem} updateBoqItem={updateBoqItem} removeBoqItem={removeBoqItem} toggleBoqItemIncluded={toggleBoqItemIncluded} activeProject={activeProject}
+            xoaToanBoBoqDuAn={xoaToanBoBoqDuAn}
             handleTakeoffImportFile={handleTakeoffImportFile} takeoffImportResults={takeoffImportResults} takeoffImportReport={takeoffImportReport}
             applyTakeoffImportRow={applyTakeoffImportRow} applyAllTakeoffImport={applyAllTakeoffImport} cancelTakeoffImport={cancelTakeoffImport} skipTakeoffImportRow={skipTakeoffImportRow}
             takeoffImportBatch={takeoffImportBatch} undoTakeoffImportBatch={undoTakeoffImportBatch}
@@ -3437,30 +3650,11 @@ function ProjectsTab({
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <PctField label="Dự phòng khối lượng phát sinh" value={activeProject.duPhongKLPct ?? 5} onChange={(v) => updateProjectSetting("duPhongKLPct", v)} />
-              <PctField label="Dự phòng trượt giá" value={activeProject.duPhongTruotGiaPct ?? 3} onChange={(v) => updateProjectSetting("duPhongTruotGiaPct", v)} />
               <PctField label="Chi phí quản lý" value={activeProject.quanLyPct} onChange={(v) => updateProjectSetting("quanLyPct", v)} />
               <PctField label="Chi phí khác" value={activeProject.khacPct} onChange={(v) => updateProjectSetting("khacPct", v)} />
               <PctField label="Lợi nhuận" value={activeProject.loiNhuanPct} onChange={(v) => updateProjectSetting("loiNhuanPct", v)} />
               <PctField label="VAT" value={activeProject.vatPct} onChange={(v) => updateProjectSetting("vatPct", v)} />
               <PctField label="Ngưỡng cảnh báo giá khoán" value={activeProject.khoanThreshold} onChange={(v) => updateProjectSetting("khoanThreshold", v)} />
-            </div>
-
-            <div className="text-sm font-semibold mt-4 mb-1" style={{ color: NAVY }}>Thông số công trình (khối lượng tự tính)</div>
-            <p className="text-xs mb-2" style={{ color: SLATE }}>Hạng mục nào gắn cơ sở tính "m² GFA / Phòng / WC / Tầng" (ở thẻ Điều chỉnh) sẽ tự tính khối lượng từ các thông số này — đổi thông số là toàn bộ BOQ tự cập nhật.</p>
-            <div className="grid grid-cols-3 gap-3">
-              {[["W", "Rộng (m)"], ["L", "Dài (m)"], ["floors", "Số tầng"], ["rooms", "Số phòng"], ["wc", "Số WC"]].map(([f, lb]) => (
-                <div key={f}>
-                  <div className="text-xs mb-1" style={{ color: SLATE }}>{lb}</div>
-                  <input type="number" step="0.1" value={activeProject[f] ?? 0} onChange={(e) => updateProjectSetting(f, parseFloat(e.target.value) || 0)} className="num-input border rounded px-2 py-1.5 text-sm w-full font-mono" style={{ borderColor: LINE }} />
-                </div>
-              ))}
-              <div>
-                <div className="text-xs mb-1" style={{ color: SLATE }}>GFA (tự tính)</div>
-                <div className="border rounded px-2 py-1.5 text-sm font-mono" style={{ borderColor: LINE, background: PAPER, color: NAVY }}>
-                  {(((Number(activeProject.W) || 0) * (Number(activeProject.L) || 0) * (Number(activeProject.floors) || 0)) || 0).toFixed(1)} m²
-                </div>
-              </div>
             </div>
 
             <div className="text-sm font-semibold mt-4 mb-1" style={{ color: NAVY }}>Nhập TOÀN BỘ mẫu dự toán từ file BOQ thật (nhiều sheet)</div>
@@ -3584,22 +3778,7 @@ function PctField({ label, value, onChange }) {
 // ============================================================================
 // TAB: ĐỌC BẢN VẼ (Drawing Intake — upload ảnh, AI đọc khối lượng, khớp định mức)
 // ============================================================================
-function DrawingsTab({ versions, photos, addDrawingVersion, handlePhotoFiles, analyzePhotoAI, analyzePhotosBatchAI, aiAnalyzing, aiProgress, aiError, aiResults, lastRawDebug, lastPipelineTrace, lastDrawingModel, applyAiResult, skipAiResult, applyAllAiResults, projectNorms, drawingFiles, handleDrawingFiles, removeDrawingFile, removePhoto, removeAllPhotos, analyzePdfAI, pdfAiAnalyzing, pdfAiProgress, pdfAiStartedAt, docFileDxf, boqLines, activeProject, setActiveTab, aiCostLast, aiCostTotal, testBackend, connTest, connTesting, authUser, authHeaders, danhSachChuanInfo, soSanhMauLienKet, themDauViecThieu }) {
-  // Đồng hồ đếm giờ khi AI đang đọc — tránh hiểu nhầm "treo" khi % đứng yên lâu
-  const [nhipDongHo, setNhipDongHo] = useState(0);
-  useEffect(() => {
-    if (!pdfAiStartedAt) return;
-    const t = setInterval(() => setNhipDongHo((n) => n + 1), 1000);
-    return () => clearInterval(t);
-  }, [pdfAiStartedAt]);
-  const dongHoDaTroiQua = (startedAt) => {
-    if (!startedAt) return "";
-    const giay = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-    const phut = Math.floor(giay / 60);
-    const giayLe = giay % 60;
-    return phut > 0 ? `${phut} phút ${giayLe} giây` : `${giayLe} giây`;
-  };
-
+function DrawingsTab({ versions, photos, addDrawingVersion, handlePhotoFiles, analyzePhotoAI, analyzePhotosBatchAI, aiAnalyzing, aiProgress, aiError, aiResults, lastRawDebug, lastPipelineTrace, lastDrawingModel, applyAiResult, skipAiResult, applyAllAiResults, projectNorms, drawingFiles, handleDrawingFiles, removeDrawingFile, removePhoto, removeAllPhotos, analyzePdfAI, pdfAiAnalyzing, pdfAiProgress, docFileDxf, boqLines, activeProject, setActiveTab, aiCostLast, aiCostTotal, testBackend, connTest, connTesting, authUser, authHeaders, danhSachChuanInfo, soSanhMauLienKet, themDauViecThieu, projects, activeProjectId, setActiveProjectId }) {
   const [activeVersionId, setActiveVersionId] = useState(versions[0]?.id || "");
   const [newVersionLabel, setNewVersionLabel] = useState("");
   const [mode, setMode] = useState("photo"); // "photo" | "pdf"
@@ -3661,6 +3840,26 @@ function DrawingsTab({ versions, photos, addDrawingVersion, handlePhotoFiles, an
     <div>
       <SectionHeader icon={Camera} title="Đọc bản vẽ — Upload ảnh/PDF" desc='Bước 1 — tải ảnh/PDF rồi bấm "Bắt đầu đọc AI". Quy trình đủ 4 bước: (1) Đọc bản vẽ → (2) Duyệt khối lượng AI đọc được → (3) Điều chỉnh khối lượng nếu cần → (4) Xem BOQ đã tính giá tự động theo nhóm công trình/nhà thầu đang chọn, rồi xuất file. Tải ảnh/PDF lên chưa tự động tính gì cả — phải bấm nút AI mới ra kết quả. Mỗi lần thiết kế thay đổi, tạo 1 phiên bản mới để so sánh.' />
 
+      {/* THÊM MỚI (theo yêu cầu): chuyển dự án ngay tại đây — trước đây phải rời
+          tab này, vào thẻ "Dự án" chọn/tạo dự án khác rồi quay lại mới đọc bản
+          vẽ tiếp được. Chỉ hiện khi có từ 2 dự án trở lên. */}
+      {Array.isArray(projects) && projects.length > 1 && (
+        <div className="mb-3 p-2.5 rounded flex items-center gap-2 flex-wrap" style={{ background: "#EEF3F8", border: `1px solid ${LINE}` }}>
+          <span className="text-xs font-semibold" style={{ color: NAVY }}>📁 Đang đọc cho dự án:</span>
+          <select
+            value={activeProjectId}
+            onChange={(e) => setActiveProjectId(e.target.value)}
+            className="text-xs px-2 py-1.5 rounded border flex-1 min-w-0"
+            style={{ borderColor: LINE, background: "#fff", color: NAVY }}
+          >
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          <span className="text-xs" style={{ color: SLATE }}>Đọc file mới cho dự án khác? Chọn ở đây, không cần rời trang.</span>
+        </div>
+      )}
+
       <div className="mb-3 inline-flex items-center gap-2 px-3 py-1.5 rounded text-xs font-semibold" style={{ background: BACKEND_URL ? "#F0FBF4" : "#FFF4E5", color: BACKEND_URL ? GREEN : AMBER_DARK }}>
         <span style={{ width: 7, height: 7, borderRadius: "50%", background: BACKEND_URL ? GREEN : AMBER_DARK, display: "inline-block" }} />
         {BACKEND_URL ? "Đang chạy qua backend riêng (ổn định)" : "Đang chạy tạm qua Claude.ai — chưa cấu hình backend riêng"}
@@ -3713,6 +3912,19 @@ function DrawingsTab({ versions, photos, addDrawingVersion, handlePhotoFiles, an
           </button>
         )}
       </div>
+
+      {/* THÊM MỚI (theo yêu cầu): hiển thị chi phí USD ngay trên màn hình — trước
+          đây backend đã tính sẵn (tongChiPhiUsd/cost) nhưng chưa hiển thị, người
+          dùng phải tự tra console.anthropic.com mới biết. */}
+      {aiCostLast && (
+        <div className="mb-3 p-2 rounded text-xs flex flex-wrap items-center gap-x-4 gap-y-1" style={{ background: "#FFF8E8", color: NAVY, border: `1px solid ${AMBER}` }}>
+          <span><strong>💰 Chi phí lần đọc gần nhất:</strong> ~${aiCostLast.usd?.toFixed(4)} (~{Math.round(aiCostLast.vnd || 0).toLocaleString("vi-VN")}đ)</span>
+          {aiCostTotal && aiCostTotal.count > 1 && (
+            <span style={{ color: SLATE }}>Tổng cộng phiên này ({aiCostTotal.count} lần đọc): ~${aiCostTotal.usd?.toFixed(4)}</span>
+          )}
+          <span style={{ color: SLATE, fontStyle: "italic" }}>Ước tính từ token thật — số chính xác 100% xem ở console.anthropic.com/settings/usage.</span>
+        </div>
+      )}
 
       {lastRawDebug && (
         <div className="mb-3 p-2 rounded text-xs" style={{ background: "#EEF3F8", color: NAVY, border: `1px solid ${LINE}`, wordBreak: "break-all" }}>
@@ -4040,18 +4252,12 @@ function DrawingsTab({ versions, photos, addDrawingVersion, handlePhotoFiles, an
                           className="w-full mb-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded text-xs font-semibold text-white disabled:opacity-60"
                           style={{ background: AMBER_DARK }}
                         >
-                          <Sparkles size={13} /> {busy ? `AI đang đọc… ${pdfAiProgress}% (đã ${dongHoDaTroiQua(pdfAiStartedAt)})` : "Bắt đầu đọc AI (AI đọc trực tiếp cả file PDF)"}
+                          <Sparkles size={13} /> {busy ? `AI đang đọc… ${pdfAiProgress}%` : "Bắt đầu đọc AI (AI đọc trực tiếp cả file PDF)"}
                         </button>
                         {busy && (
-                          <>
-                            <div className="w-full h-1.5 rounded overflow-hidden mb-1" style={{ background: LINE }}>
-                              <div className="h-full transition-all" style={{ width: `${pdfAiProgress}%`, background: AMBER }} />
-                            </div>
-                            <div className="text-xs mb-2 flex items-center gap-1" style={{ color: SLATE }}>
-                              <span className="inline-block w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: GREEN }} />
-                              Vẫn đang chạy thật (đồng hồ trên vẫn tăng) — % có thể đứng yên 1 lúc do đang chờ AI xử lý, KHÔNG phải app treo.
-                            </div>
-                          </>
+                          <div className="w-full h-1.5 rounded overflow-hidden mb-2" style={{ background: LINE }}>
+                            <div className="h-full transition-all" style={{ width: `${pdfAiProgress}%`, background: AMBER }} />
+                          </div>
                         )}
                         <a href={f.url} download={f.name} target="_blank" rel="noreferrer" className="flex flex-col items-center justify-center gap-2 rounded" style={{ height: 160, background: PAPER, border: `1px dashed ${LINE}`, color: SLATE }}>
                           <FileText size={28} color={RED} />
@@ -5565,7 +5771,7 @@ function TakeoffImportRow({ r, projectNorms, applyTakeoffImportRow, skipTakeoffI
 // mà phát hiện cần sửa, không cần lật qua lại nhiều thẻ)
 // ============================================================================
 function AdjustTab({
-  boqLines, projectNorms, addBoqItem, updateBoqItem, removeBoqItem, toggleBoqItemIncluded, activeProject,
+  boqLines, projectNorms, addBoqItem, updateBoqItem, removeBoqItem, toggleBoqItemIncluded, activeProject, xoaToanBoBoqDuAn,
   handleTakeoffImportFile, takeoffImportResults, takeoffImportReport, applyTakeoffImportRow, applyAllTakeoffImport, cancelTakeoffImport, skipTakeoffImportRow, takeoffImportBatch, undoTakeoffImportBatch,
   changeLog, revisionSnapshots, luuSnapshotBoq, soSanhSnapshot, normsById,
 }) {
@@ -5586,6 +5792,17 @@ function AdjustTab({
   return (
     <div>
       <SectionHeader icon={Layers} title="Điều chỉnh Dự toán / Khối lượng" desc={`Thêm/sửa khối lượng và đơn giá khoán cho dự án "${activeProject?.name}" — dùng khi kiểm tra lại thấy AI đọc bản vẽ thiếu/sai, hoặc cần thêm hạng mục thủ công. Dòng nào lệch quá ngưỡng cảnh báo (${fmtPct(threshold)}, chỉnh ở thẻ "Dự án") sẽ tô đỏ — rủi ro lỗ khi ký khoán.`} />
+
+      {boqLines.length > 0 && (
+        <div className="mb-4 p-3 rounded border flex items-center justify-between gap-3" style={{ borderColor: RED, background: "#FCEBEA" }}>
+          <div className="text-xs" style={{ color: INK }}>
+            Muốn đọc bản vẽ khác cho dự án này (khối lượng cũ không còn đúng nữa)? Xoá hết để làm lại từ đầu, không cần thoát app.
+          </div>
+          <button onClick={xoaToanBoBoqDuAn} className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: RED }}>
+            <Trash2 size={13} /> Xoá toàn bộ khối lượng dự án này
+          </button>
+        </div>
+      )}
 
       <div className="mb-4 p-3 rounded border" style={{ borderColor: hienCotNghiemThu ? GREEN : LINE, background: hienCotNghiemThu ? "#F0FBF4" : "#F6F8FA" }}>
         <div className="flex items-center justify-between">
@@ -5760,13 +5977,10 @@ function AdjustTab({
                           </td>
                           <td className="px-3 py-1.5">{norm.unit}</td>
                           <td className="px-3 py-1.5">
-                            <select value={boq.basis || "manual"} onChange={(e) => updateBoqItem(boq.id, "basis", e.target.value)} className="border rounded px-1 py-0.5 text-xs w-full mb-0.5" style={{ borderColor: LINE, color: SLATE }} title="Cơ sở tính khối lượng — chọn khác 'Nhập tay' thì KL tự tính từ Thông số công trình (thẻ Dự án)">
-                              <option value="manual">Nhập tay</option>
-                              <option value="gfa">m² GFA × hệ số</option>
-                              <option value="room">Phòng × hệ số</option>
-                              <option value="wc">WC × hệ số</option>
-                              <option value="floor">Tầng × hệ số</option>
-                            </select>
+                            {/* THEO YÊU CẦU: bỏ dropdown "Cơ sở tính khối lượng" (m² GFA/Phòng/
+                                WC/Tầng) — phụ thuộc "Thông số công trình" đã xoá, không còn ý
+                                nghĩa khi khối lượng lấy trực tiếp từ AI đọc bản vẽ. Luôn hiện ô
+                                nhập tay trực tiếp. */}
                             {(!boq.basis || boq.basis === "manual") ? (
                               <div className="flex items-center gap-1">
                                 <input type="number" value={boq.qty} onChange={(e) => { const v = parseFloat(e.target.value); updateBoqItem(boq.id, "qty", (Number.isFinite(v) && v >= 0) ? v : 0); }} className="num-input w-full text-right outline-none bg-transparent font-mono" />
@@ -6254,24 +6468,18 @@ function ExportHubTab({ boqLines, totals, hasData, activeProject, exportExcel, e
     { id: "excel", label: "Xuất Excel", icon: FileSpreadsheet },
   ];
 
-  // Cổng "Xuất bản CHÍNH THỨC" — CHỈ còn chặn CỨNG nếu còn dòng "QC_MISSING"
-  // (định mức TỰ TẠO khi duyệt hàng loạt — cả TÊN lẫn GIÁ đều chưa xác nhận,
-  // rủi ro khác hẳn "chỉ thiếu giá": tên có thể sai/không tồn tại thật) hoặc
-  // dự án trống. "Giá mượn" và "giá 0đ" (PRICE_MISSING) KHÔNG còn chặn — theo
-  // yêu cầu rõ ràng: tự động mượn/tính rồi cho xuất luôn, KS QS sẽ rà soát lại
-  // 100% sau khi xuất, không cần nhập tay trước mới được xuất. "Xuất bản
-  // NHÁP" vẫn luôn dùng được không giới hạn.
+  // Cổng "Xuất bản CHÍNH THỨC" — chặn CỨNG nếu còn: dòng Review (giá 0đ/định mức
+  // tự tạo), dòng dùng giá MƯỢN từ nhóm khác (chưa duyệt giá thật cho đúng nhóm
+  // công trình này), hoặc dự án trống. "Xuất bản NHÁP" vẫn luôn dùng được không
+  // giới hạn — QS cần xem/kiểm tra nội bộ trước khi mọi thứ sẵn sàng.
   const soQcMissing = boqLines.filter((l) => l.calc?.trangThai === "QC_MISSING").length;
   const soPriceMissing = boqLines.filter((l) => l.calc?.trangThai === "PRICE_MISSING").length;
   const soReview = soQcMissing + soPriceMissing; // gộp lại để tương thích chỗ khác đang dùng "chưa sẵn sàng"
   const soGiaMuon = boqLines.filter((l) => l.calc?.coGiaMuon).length;
   const lyDoChuaSanSang = [];
   if (soQcMissing > 0) lyDoChuaSanSang.push(`${soQcMissing} dòng "QC MISSING" — định mức tự tạo khi duyệt hàng loạt, CHƯA qua kiểm tra kỹ thuật (tên lẫn giá đều chưa xác nhận)`);
-  // Vẫn hiện CẢNH BÁO (không chặn) để KS QS biết chỗ cần rà soát kỹ hơn khi
-  // duyệt lại — chỉ khác là không còn khoá nút xuất vì lý do này nữa.
-  const canhBaoKhongChan = [];
-  if (soPriceMissing > 0) canhBaoKhongChan.push(`${soPriceMissing} dòng "PRICE MISSING" — định mức/tên đã đúng nhưng giá cuối = 0đ, cần KS QS bổ sung giá khi rà soát`);
-  if (soGiaMuon > 0) canhBaoKhongChan.push(`${soGiaMuon} dòng đang dùng giá MƯỢN từ nhóm công trình khác — cần KS QS xác nhận giá này hợp lý khi rà soát`);
+  if (soPriceMissing > 0) lyDoChuaSanSang.push(`${soPriceMissing} dòng "PRICE MISSING" — định mức/tên đã đúng nhưng giá cuối = 0đ`);
+  if (soGiaMuon > 0) lyDoChuaSanSang.push(`${soGiaMuon} dòng đang dùng giá MƯỢN từ nhóm công trình khác — chưa có giá duyệt riêng cho nhóm này`);
   const chuaSanSangXuatChinhThuc = lyDoChuaSanSang.length > 0 || soHienThi === 0;
 
   return (
@@ -6285,15 +6493,6 @@ function ExportHubTab({ boqLines, totals, hasData, activeProject, exportExcel, e
             {lyDoChuaSanSang.map((l, i) => <li key={i}>{l}</li>)}
           </ul>
           <div className="text-xs mt-1" style={{ color: SLATE }}>Vẫn xuất được bản NHÁP để kiểm tra nội bộ (nút riêng bên dưới) — nhưng nút "Xuất bản CHÍNH THỨC" bị khoá tới khi xử lý hết các dòng trên.</div>
-        </div>
-      )}
-
-      {canhBaoKhongChan.length > 0 && soHienThi > 0 && (
-        <div className="mb-4 p-3 rounded border" style={{ borderColor: AMBER, background: "#FFF3CD" }}>
-          <div className="text-sm font-semibold mb-1" style={{ color: "#8A6300" }}>⚠️ Vẫn xuất được bản CHÍNH THỨC, nhưng cần KS QS rà soát kỹ các dòng sau trước khi gửi đi:</div>
-          <ul className="text-xs list-disc pl-4" style={{ color: INK }}>
-            {canhBaoKhongChan.map((l, i) => <li key={i}>{l}</li>)}
-          </ul>
         </div>
       )}
 
@@ -6368,7 +6567,7 @@ function ExportHubTab({ boqLines, totals, hasData, activeProject, exportExcel, e
               <FileSpreadsheet size={16} /> Xuất bản NHÁP (luôn dùng được, để kiểm tra nội bộ)
             </button>
             <button onClick={exportExcel} disabled={chuaSanSangXuatChinhThuc} title={chuaSanSangXuatChinhThuc ? "Còn dòng Review hoặc giá mượn chưa xử lý — xem chi tiết ở khung đỏ phía trên" : "Sẵn sàng — mọi dòng đã Confirmed, giá đã duyệt riêng cho nhóm công trình này"} className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 rounded text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed" style={{ background: chuaSanSangXuatChinhThuc ? SLATE : GREEN }}>
-              {chuaSanSangXuatChinhThuc ? <>🔒 Xuất bản CHÍNH THỨC (đang khoá)</> : <><FileSpreadsheet size={16} /> Xuất bản CHÍNH THỨC (4 sheet, có công thức)</>}
+              {chuaSanSangXuatChinhThuc ? <>🔒 Xuất bản CHÍNH THỨC (đang khoá)</> : <><FileSpreadsheet size={16} /> Xuất bản CHÍNH THỨC (13 sheet, có công thức)</>}
             </button>
 
             {lastExport && (
@@ -6385,12 +6584,13 @@ function ExportHubTab({ boqLines, totals, hasData, activeProject, exportExcel, e
           </div>
 
           <div className="max-w-xl p-3 rounded border" style={{ borderColor: LINE, background: "#F6F8FA" }}>
-            <div className="text-xs font-semibold mb-1" style={{ color: NAVY }}>Cấu trúc file xuất ra (4 sheet):</div>
+            <div className="text-xs font-semibold mb-1" style={{ color: NAVY }}>Cấu trúc file xuất ra (13 sheet):</div>
             <ul className="text-xs list-disc pl-4" style={{ color: SLATE }}>
               <li><strong>DonGia</strong> — bảng giá vật tư/nhân công gốc (giá trị nhập tay)</li>
               <li><strong>PhanTich</strong> — công thức tham chiếu sang DonGia, tự tính đơn giá phân tích từng định mức</li>
-              <li><strong>BOQ</strong> — công thức tham chiếu sang PhanTich, nhân khối lượng ra thành tiền, so sánh với giá khoán</li>
-              <li><strong>DuToanTongHop</strong> — công thức cộng dồn ra giá thành, giá bán, VAT</li>
+              <li><strong>BOQ</strong> — công thức tham chiếu sang PhanTich, nhân khối lượng ra thành tiền, so sánh với giá khoán (nguồn số liệu chính)</li>
+              <li><strong>TongHop_DuToan</strong> — công thức cộng dồn ra giá thành, giá bán, VAT</li>
+              <li><strong>BOQ_V1.1 → V4.1</strong> (9 sheet) — trình bày lại đúng theo form chuẩn công ty, tự phân loại từng dòng vào đúng giai đoạn (thô/hoàn thiện/điện/nước/HVAC/nội thất/vệ sinh/PCCC/thang máy), kèm mã chi phí chuẩn — dùng cùng số liệu với sheet BOQ, không tính lại</li>
             </ul>
           </div>
 
