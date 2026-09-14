@@ -4,6 +4,19 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>QS/QC Estimate — PT CONS</title>
+  <!-- THÊM MỚI: hỗ trợ PWA — cài được vào màn hình chính, mở ra giống app
+       riêng (không còn thanh địa chỉ trình duyệt). LƯU Ý THÀNH THẬT: không
+       ngăn được việc hệ điều hành tạm dừng trang khi chuyển app khác lâu
+       (giới hạn chung của mọi web app trên điện thoại, kể cả PWA, đặc biệt
+       trên iPhone) — cái thực sự giữ an toàn kết quả là job vẫn chạy tiếp ở
+       server (Postgres) dù điện thoại có bị treo, và app tự nối lại theo dõi
+       khi mở lại (xem phần khôi phục job bên dưới trong app.bundle.js). -->
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#1F3B57" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="QS Estimate" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
@@ -18,5 +31,15 @@
     <div id="loading">Đang tải ứng dụng dự toán PT CONS… (lần đầu nếu server vừa ngủ dậy có thể chờ ~50 giây)</div>
   </div>
   <script src="/app.bundle.js"></script>
+  <script>
+    // Đăng ký service worker — điều kiện cần để trình duyệt cho phép "Thêm
+    // vào Màn hình chính" hoạt động như app thật (PWA). Lỗi ở đây không nên
+    // chặn app chạy — chỉ bỏ qua nếu trình duyệt không hỗ trợ.
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/sw.js").catch(() => {});
+      });
+    }
+  </script>
 </body>
 </html>

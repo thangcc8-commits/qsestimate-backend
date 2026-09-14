@@ -2460,6 +2460,22 @@ app.get("/app.bundle.js", (req, res) => {
   }
   res.status(404).send("// chưa có app.bundle.js");
 });
+// THÊM MỚI: phục vụ file PWA (manifest, service worker, icon) — no-store trên
+// manifest/sw.js để tránh đúng lỗi cache cũ đã gặp với app.bundle.js trước đây.
+app.get("/manifest.json", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "manifest.json"));
+});
+app.get("/sw.js", (req, res) => {
+  res.type("application/javascript");
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "sw.js"));
+});
+app.get("/icon-:size(192|512).png", (req, res) => {
+  const f = path.join(__dirname, `icon-${req.params.size}.png`);
+  if (fs.existsSync(f)) return res.sendFile(f);
+  res.status(404).end();
+});
 
 // Web Worker đọc DXF — chạy tách biệt khỏi luồng giao diện chính để file lớn
 // (hàng chục nghìn entity) không làm khựng màn hình. File này TỰ CHỨA
