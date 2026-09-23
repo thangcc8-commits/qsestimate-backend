@@ -334,13 +334,19 @@ async function callClaude(contentBlocks, betaHeader) {
   // dễ bỏ sót/nhầm khi bản vẽ phức tạp nhiều hạng mục. Trong khung chat này,
   // Claude tự nhiên suy luận kỹ trước khi trả lời — đây là khác biệt hành vi
   // thật, không phải "khung chat giỏi hơn app". Bật thinking với budget thật
-  // (10000 token suy luận), temperature=1 (BẮT BUỘC theo tài liệu chính thức
+  // (5000 token suy luận — giảm 1 nửa theo yêu cầu chú để cân bằng chi phí),
+  // temperature=1 (BẮT BUỘC theo tài liệu chính thức
   // khi bật thinking, request sẽ bị từ chối nếu để giá trị khác). Tăng
   // max_tokens lên 32000 để đủ chỗ cho cả token suy luận LẪN toàn bộ JSON kết
   // quả (thinking tokens tính vào chung max_tokens, không phải khoản riêng).
+  // THEO YÊU CẦU CHÚ (cân bằng chi phí/độ chính xác — mỗi lần đọc từng tốn
+  // tới ~$2 do ngân sách suy luận 10000 token cũ): giảm còn 5000 — giảm ~1
+  // nửa chi phí phần suy luận, vẫn giữ phần lớn lợi ích về độ chính xác so
+  // với tắt hẳn thinking. max_tokens giữ nguyên 32000 (chỉ là giới hạn trần,
+  // không tính tiền theo phần chưa dùng tới, không cần giảm theo).
   const body = JSON.stringify({
     model: ANTHROPIC_MODEL, max_tokens: 32000, temperature: 1,
-    thinking: { type: "enabled", budget_tokens: 10000 },
+    thinking: { type: "enabled", budget_tokens: 5000 },
     messages: [{ role: "user", content: contentBlocksThat }],
   });
 
@@ -1025,69 +1031,7 @@ function tinhConfidenceMatrix(item, b05Status, canhBaoTheoMaHieu) {
   return { evidenceConfidence, geometryConfidence, dimensionConfidence, formulaConfidence, reconciliationConfidence };
 }
 
-
-// Bổ sung hạng mục còn THIẾU so với danh sách mẫu BOQ
-function chuanHoaTenHangMuc(ten) {
-  return String(ten || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function boSungHangMucThieuTheoMau(items, danhSachChuan) {
-  const list = Array.isArray(danhSachChuan) ? danhSachChuan.filter((t) => String(t || "").trim()) : [];
-  if (!list.length) {
-    return {
-      items: items || [],
-      baoCaoKiemTra: {
-        coMau: false, soMau: 0, soTraVe: (items || []).length, soKhopMau: 0,
-        thieuTheoMau: [], thuaNgoaiMau: [],
-        dongQty0: (items || []).filter((it) => !(Number(it.qty) > 0)).map((it) => it.name),
-        ketLuan: "Không có danh sách mẫu — không đối chiếu BOQ mẫu.",
-      },
-    };
-  }
-  const ketQua = Array.isArray(items) ? items.map((it) => ({ ...it })) : [];
-  const tenCo = new Set(ketQua.map((it) => chuanHoaTenHangMuc(it.name)));
-  const thieu = [];
-  for (const ten of list) {
-    const key = chuanHoaTenHangMuc(ten);
-    if (!key) continue;
-    if (!tenCo.has(key)) {
-      thieu.push(ten);
-      ketQua.push({
-        name: ten, unit: "tổng hợp", qty: 0, calc_type: "doc_truc_tiep",
-        formula_inputs: { value_do_duoc: 0 },
-        note: "[THIẾU TRÊN BẢN VẼ / BỔ SUNG TỪ MẪU BOQ] AI không trả hạng mục này — đã tự thêm qty=0 theo danh sách mẫu. QS bắt buộc kiểm tra bản vẽ.",
-        qty_source: "template_fill", trangThaiKiemTra: "THIEU_TREN_BAN_VE",
-        confidenceMatrix: { overall: 0, note: "Bổ sung từ mẫu, chưa có căn cứ trên bản vẽ" },
-      });
-      tenCo.add(key);
-    }
-  }
-  const mauKeys = new Set(list.map(chuanHoaTenHangMuc).filter(Boolean));
-  const thua = ketQua.filter((it) => {
-    const k = chuanHoaTenHangMuc(it.name);
-    return k && !mauKeys.has(k);
-  }).map((it) => it.name);
-  const soKhop = ketQua.filter((it) => mauKeys.has(chuanHoaTenHangMuc(it.name))).length;
-  return {
-    items: ketQua,
-    baoCaoKiemTra: {
-      coMau: true, soMau: list.length, soTraVe: ketQua.length, soKhopMau: soKhop,
-      thieuTheoMau: thieu, thuaNgoaiMau: thua,
-      dongQty0: ketQua.filter((it) => !(Number(it.qty) > 0)).map((it) => it.name),
-      ketLuan: thieu.length === 0
-        ? `Đủ ${list.length}/${list.length} đầu việc theo mẫu BOQ.`
-        : `Đã bổ sung ${thieu.length} đầu việc còn thiếu từ mẫu (qty=0). Tổng: ${ketQua.length} dòng.`,
-    },
-  };
-}
-
-function chayPipeline9Buoc(rawItems, soLuongAnh, images, ocrData = null, danhSachChuan = null) {
+function chayPipeline9Buoc(rawItems, soLuongAnh, images, ocrData = null) {
   const trace = [];
   trace.push(b01_ingest(images));
   trace.push(b02_classify(rawItems));
@@ -1105,24 +1049,9 @@ function chayPipeline9Buoc(rawItems, soLuongAnh, images, ocrData = null, danhSac
   trace.push(b09.trace);
 
   const maHieuLech = new Set((b09.canhBaoThat || []).map((c) => c.maHieu));
-  let itemsVoiConfidence = b09.ketQua.map((it) => ({ ...it, confidenceMatrix: tinhConfidenceMatrix(it, b05Trace.status, maHieuLech) }));
+  const itemsVoiConfidence = b09.ketQua.map((it) => ({ ...it, confidenceMatrix: tinhConfidenceMatrix(it, b05Trace.status, maHieuLech) }));
 
-  const { items: itemsDuMau, baoCaoKiemTra } = boSungHangMucThieuTheoMau(itemsVoiConfidence, danhSachChuan);
-  itemsVoiConfidence = itemsDuMau;
-  trace.push({
-    step: "10_TEMPLATE_GAP",
-    status: baoCaoKiemTra.thieuTheoMau && baoCaoKiemTra.thieuTheoMau.length ? "partial" : "done",
-    detail: baoCaoKiemTra.ketLuan,
-    thieuTheoMau: baoCaoKiemTra.thieuTheoMau || [],
-    thuaNgoaiMau: baoCaoKiemTra.thuaNgoaiMau || [],
-  });
-
-  return {
-    items: itemsVoiConfidence,
-    pipelineTrace: trace,
-    drawingModel: xayDungDrawingModel(itemsVoiConfidence, images, b07Res.relationships),
-    baoCaoKiemTra,
-  };
+  return { items: itemsVoiConfidence, pipelineTrace: trace, drawingModel: xayDungDrawingModel(itemsVoiConfidence, images, b07Res.relationships) };
 }
 
 // Cấu trúc đầu ra chuẩn hoá {drawing, pages, objects, evidence, dimensions,
@@ -1781,7 +1710,7 @@ function taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien, duToanMauThamCh
       `\n\nNHIỆM VỤ BẮT BUỘC — RÀ QUA TỪNG ĐẦU VIỆC TRONG DANH SÁCH TRÊN, LẦN LƯỢT TỪ 1 ĐẾN ${danhSachChuan.length}, KHÔNG BỎ SÓT ĐẦU VIỆC NÀO:\n` +
       `Với MỖI đầu việc trong danh sách, kiểm tra kỹ toàn bộ (các) trang bản vẽ xem có số liệu/kích thước/ghi chú nào liên quan không. ` +
       `Nếu CÓ đủ căn cứ để tính (dù phải suy luận từ kích thước/diện tích ghi trên bản vẽ) → thêm 1 dòng vào kết quả, "name" ghi ĐÚNG NGUYÊN VĂN tên trong danh sách trên. ` +
-      `Nếu KHÔNG tìm thấy căn cứ nào → VẪN BẮT BUỘC thêm 1 dòng name đúng mẫu, qty=0 (calc_type="doc_truc_tiep", value_do_duoc=0), note "[THIẾU TRÊN BẢN VẼ]" — không bịa số dương. Kết quả phải đủ số đầu việc trong danh sách mẫu. ` +
+      `Nếu KHÔNG tìm thấy căn cứ nào cho đầu việc đó trên (các) trang bản vẽ hiện có → BỎ QUA đầu việc đó (không thêm vào kết quả, không bịa số) — nhưng vẫn phải kiểm tra hết toàn bộ danh sách trước khi kết luận, không dừng sớm. ` +
       `Đây là bộ bản vẽ thật của 1 công trình đầy đủ — nếu danh sách mẫu có ${danhSachChuan.length} đầu việc mà kết quả trả về chỉ vài dòng, gần như chắc chắn bạn đã BỎ SÓT chứ không phải bản vẽ thiếu dữ liệu — hãy xem lại kỹ hơn trước khi kết luận thiếu. ` +
       `Sau danh sách chuẩn, NẾU còn thấy số liệu rõ ràng trên bản vẽ mà KHÔNG khớp đầu việc nào trong danh sách, vẫn thêm vào kết quả với tên mới phù hợp (đừng bỏ sót số liệu chỉ vì không có sẵn tên).`;
   }
@@ -1868,31 +1797,26 @@ app.post("/api/analyze-image", aiLimiter, batBuocDangNhap, async (req, res) => {
     if (!check.ok) return res.status(400).json({ error: check.message, code: check.code });
     const base64 = check.base64;
     const mediaType = check.mediaType || rawMt || "image/jpeg";
-
-    // SỬA LỖI THẬT (mobile/mạng chập chờn): giữ 1 HTTP mở 3–20 phút tới khi AI
-    // xong dễ bị cắt im lặng → app "không đọc được bản vẽ". Giờ ảnh đơn cũng
-    // qua job nền như PDF — trả jobId ngay, client poll status/result.
-    if (soJobDangChayNen >= GIOI_HAN_JOB_DONG_THOI) {
-      return res.status(429).json({ error: `Đang có ${soJobDangChayNen} job lớn chạy nền — chờ job hiện tại xong rồi thử lại.` });
-    }
-    const jobId = uidBackend("job");
-    const job = {
-      jobId, taoLuc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?",
-      loai: "anh_don", tongSoAnh: 1, tenFile: req.body?.name || "anh.jpg",
-      ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu,
-      tongSoLo: 1,
-      cacLo: [{ soLo: 1, anh: [{ mediaType, base64, name: req.body?.name || "anh.jpg" }], trangThai: "cho", items: [], loi: null }],
-      trangThaiTong: "dang_chay",
-    };
-    await ghiJob(job);
-    soJobDangChayNen++;
-    xuLyJobNen(jobId)
-      .catch((e) => console.error("[Job ảnh] lỗi:", jobId, e.message))
-      .finally(() => { soJobDangChayNen = Math.max(0, soJobDangChayNen - 1); });
-    res.json({
-      jobId, tongSoLo: 1, tongSoAnh: 1, trangThai: "dang_chay",
-      ghiChu: "Đang xử lý nền ảnh bản vẽ — app sẽ tự hỏi lại tiến độ, không cần giữ kết nối mở lâu.",
-    });
+    // SỬA LỖI THẬT: trước đây Claude và OCR chạy TUẦN TỰ (OCR chờ Claude xong
+    // mới bắt đầu), dù OCR không phụ thuộc kết quả Claude (chỉ cần base64/
+    // mediaType đã có sẵn từ trước) — gây độ trễ cộng dồn không cần thiết khi
+    // bật VISION_WITH_ANALYZE. Giờ chạy song song bằng Promise.all.
+    const [data, ocrBoSung] = await Promise.all([
+      callUnifiedAI([
+        { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+        { type: "text", text: taoPrompt(ghiChuThem, danhSachChuan, tenCam, tenUuTien, duToanMauThamChieu) },
+      ], undefined, provider),
+      layOcrBoSungNeuBat(base64, mediaType),
+    ]);
+    const hangDaDung = provider || AI_PROVIDER;
+    const chiPhi = tinhChiPhi(data.usage, undefined, hangDaDung);
+    ghiNhatKy({ luc: new Date().toISOString(), nguoi: req.nguoiDung?.ten || "?", loai: "ảnh", ten: req.body?.name || "", ...chiPhi });
+    const rawItems = parseRawJsonTuAI(data);
+    const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ base64, name: req.body?.name || "?" }], ocrBoSung);
+    // SỬA LỖI THẬT: drawingModel được Engine tính ra đầy đủ nhưng trước đây
+    // KHÔNG BAO GIỜ được trả về response — frontend mất toàn bộ object/
+    // evidence/relationships dù backend đã tính đúng.
+    res.json({ items, pipelineTrace, drawingModel, cost: chiPhi, model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung, ocrBoSung });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
@@ -2006,9 +1930,9 @@ app.post("/api/analyze-images-batch", aiLimiter, gioiHanDongThoi, batBuocDangNha
     // Trả kèm danh sách tên ảnh theo ĐÚNG thứ tự đã đánh số, để frontend tra
     // source_image_index -> tên file thật, gán sourcePhoto chính xác từng dòng.
     const rawItems = parseRawJsonTuAI(data);
-    const { items, pipelineTrace, drawingModel, baoCaoKiemTra } = chayPipeline9Buoc(rawItems, images.length, images, ocrBoSung, danhSachChuan);
+    const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, images.length, images, ocrBoSung);
     res.json({
-      items, pipelineTrace, drawingModel, baoCaoKiemTra, cost: chiPhi,
+      items, pipelineTrace, drawingModel, cost: chiPhi,
       model: hangDaDung === "claude" ? ANTHROPIC_MODEL : hangDaDung, provider: hangDaDung,
       imageNames: images.map((i) => i.name || "?"),
       ocrBoSung,
@@ -2124,11 +2048,10 @@ async function xuLyJobNen(jobId) {
         contentBlocks.push({ type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) });
         const data = await callUnifiedAI(contentBlocks, undefined, job.provider);
         const rawItems = parseRawJsonTuAI(data);
-        const { items, pipelineTrace, drawingModel, baoCaoKiemTra } = chayPipeline9Buoc(rawItems, lo.anh.length, lo.anh, null, job.danhSachChuan);
+        const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, lo.anh.length, lo.anh);
         lo.items = items;
         lo.pipelineTrace = pipelineTrace;
         lo.drawingModel = drawingModel;
-        lo.baoCaoKiemTra = typeof baoCaoKiemTra !== "undefined" ? baoCaoKiemTra : null;
         lo.trangThai = "xong";
         thanhCong = true;
         const chiPhi = tinhChiPhi(data.usage, undefined, job.provider || AI_PROVIDER);
@@ -2209,15 +2132,12 @@ app.get("/api/jobs/:jobId/result", batBuocDangNhap, async (req, res) => {
   const job = await docJob(req.params.jobId);
   if (!job) return res.status(404).json({ error: "Không tìm thấy job." });
   if (job.trangThaiTong === "dang_chay") return res.status(202).json({ error: "Job chưa xử lý xong, thử lại sau.", trangThaiTong: job.trangThaiTong });
-  let items = job.cacLo.flatMap((l) => l.items || []);
-  const gapToanCuc = boSungHangMucThieuTheoMau(items, job.danhSachChuan);
-  items = gapToanCuc.items;
+  const items = job.cacLo.flatMap((l) => l.items || []);
   const canhBaoTrungLap = doiChieuToanCuc(job.cacLo);
   const tongChiPhi = job.cacLo.reduce((s, l) => s + (l.chiPhi?.usd || 0), 0);
   res.json({
     jobId: job.jobId, trangThaiTong: job.trangThaiTong, tongSoLo: job.tongSoLo,
     items, canhBaoTrungLapGiuaCacLo: canhBaoTrungLap, tongChiPhiUsd: +tongChiPhi.toFixed(5),
-    baoCaoKiemTra: gapToanCuc.baoCaoKiemTra,
     loCoLoi: job.cacLo.filter((l) => l.trangThai === "loi").map((l) => ({ soLo: l.soLo, loi: l.loi })),
     // SỬA LỖI THẬT: trước đây endpoint này KHÔNG trả pipelineTrace/drawingModel
     // dù mỗi lô đã tính sẵn (lo.pipelineTrace/lo.drawingModel) — frontend đọc
@@ -2278,8 +2198,14 @@ async function chiaPdfLonNeuCanThiet(base64) {
   return { tongSoTrang, cacPhan };
 }
 
-async function xuLyJobPdfLon(jobId) {
-  const job = await docJob(jobId);
+async function xuLyJobPdfLon(jobId, jobBanDau) {
+  // SỬA LỖI THẬT (đi cùng với sửa route /api/analyze-pdf ở trên): nhận thẳng
+  // job từ route thay vì đọc lại qua docJob(jobId) — vì tại thời điểm này
+  // job CHƯA TỪNG được ghi vào Postgres/file (route giờ trả lời ngay, không
+  // còn ghi trước nữa) — docJob() sẽ trả về null, khiến hàm thoát ngay lập
+  // tức ở dòng "if (!job) return" bên dưới, làm mất trắng toàn bộ job một
+  // cách âm thầm. Lần ghi đầu tiên thật sự diễn ra ngay trong vòng lặp dưới.
+  const job = jobBanDau || (await docJob(jobId));
   if (!job) return;
   const SO_LAN_THU_LO = 2; // đồng bộ với xuLyJobNen — xem giải thích ở đó
   for (let i = 0; i < job.cacLo.length; i++) {
@@ -2291,43 +2217,17 @@ async function xuLyJobPdfLon(jobId) {
     let thanhCong = false, loiLanCuoi = "";
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
       try {
-        if (!lo.pdfBase64) throw new Error("Thiếu pdfBase64 của lô (đã bị xoá sau xử lý hoặc job hỏng) — tải lại file PDF.");
-        // KHÔI PHỤC (rơi mất trong 1 lần ghép trước): file lô > ~3MB base64 ưu
-        // tiên qua Files API thay vì nhét thẳng base64 vào request — né trần
-        // 32MB payload của Anthropic, ổn định hơn với PDF nhiều trang/nặng.
-        const uocByte = Math.floor((lo.pdfBase64.length * 3) / 4);
-        let contentBlocks;
-        let betaHeader = "pdfs-2024-09-25";
-        if (uocByte > 3 * 1024 * 1024 && typeof uploadPdfToFilesApi === "function" && ANTHROPIC_API_KEY) {
-          try {
-            const fileId = await uploadPdfToFilesApi(lo.pdfBase64, `${job.tenFile || "part"}_${i + 1}.pdf`);
-            const fid = typeof fileId === "string" ? fileId : (fileId?.id || fileId?.file_id);
-            if (!fid) throw new Error("Files API không trả file_id");
-            contentBlocks = [
-              { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
-              { type: "document", source: { type: "file", file_id: fid } },
-              { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
-            ];
-            betaHeader = "pdfs-2024-09-25,files-api-2025-04-14";
-          } catch (upErr) {
-            console.warn("[Job PDF] Files API thất bại, fallback base64:", upErr.message);
-            contentBlocks = null;
-          }
-        }
-        if (!contentBlocks) {
-          contentBlocks = [
-            { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
-            { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
-          ];
-        }
-        const data = await callUnifiedAI(contentBlocks, betaHeader, job.provider);
+        const contentBlocks = [
+          { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
+          { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
+        ];
+        const data = await callUnifiedAI(contentBlocks, "pdfs-2024-09-25", job.provider);
         const rawItems = parseRawJsonTuAI(data);
-        const { items, pipelineTrace, drawingModel, baoCaoKiemTra } = chayPipeline9Buoc(rawItems, 1, [{ name: `${job.tenFile || "document.pdf"} (trang ${lo.tuTrang}-${lo.denTrang})` }], null, job.danhSachChuan);
+        const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ name: `${job.tenFile || "document.pdf"} (trang ${lo.tuTrang}-${lo.denTrang})` }]);
         lo.items = items;
         lo.pipelineTrace = pipelineTrace;
         lo.drawingModel = drawingModel;
-        lo.baoCaoKiemTra = typeof baoCaoKiemTra !== "undefined" ? baoCaoKiemTra : null;
         lo.trangThai = "xong";
         thanhCong = true;
         const chiPhi = tinhChiPhi(data.usage, undefined, job.provider || AI_PROVIDER);
@@ -2395,9 +2295,21 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
       cacLo: cacPhan.map((p, idx) => ({ soLo: idx + 1, pdfBase64: p.base64, tuTrang: p.tuTrang, denTrang: p.denTrang, trangThai: "cho", items: [], loi: null })),
       trangThaiTong: "dang_chay",
     };
-    await ghiJob(job);
+    // SỬA LỖI THẬT (chẩn đoán từ chính triệu chứng lặp lại nhiều lần: "dừng
+    // sau khoảng chục giây, không báo lỗi gì" — dao động 12-20s mỗi lần khác
+    // nhau, không cố định): TRƯỚC ĐÂY route này "await ghiJob(job)" — GHI
+    // XONG TOÀN BỘ dữ liệu job (bao gồm cả file đã mã hoá, có thể nặng nhiều
+    // MB) vào Postgres — RỒI MỚI trả lời cho trình duyệt. Nghĩa là thời gian
+    // trình duyệt phải chờ nhận được jobId phụ thuộc vào TỐC ĐỘ GHI DATABASE
+    // của 1 payload nặng, không chỉ là "tạo job" (việc vốn phải rất nhanh).
+    // Nếu Postgres chậm/có trục trặc kết nối thoáng qua lúc đó, cả request
+    // treo/lỗi âm thầm TRƯỚC KHI trình duyệt kịp nhận jobId — đúng khớp hiện
+    // tượng "im lặng dừng giữa chừng" đã gặp nhiều lần. Giờ trả lời NGAY LẬP
+    // TỨC (chỉ là object JS trong bộ nhớ, không phụ thuộc gì bên ngoài) — việc
+    // ghi Postgres thật sự diễn ra Ở NỀN, ngay trong xuLyJobPdfLon (lần ghi
+    // đầu tiên trong vòng lặp xử lý lô) — không còn chặn người dùng chờ nữa.
     soJobDangChayNen++;
-    xuLyJobPdfLon(jobId).catch((e) => console.error("[Job PDF] Lỗi:", jobId, e.message)).finally(() => { soJobDangChayNen = Math.max(0, soJobDangChayNen - 1); });
+    xuLyJobPdfLon(jobId, job).catch((e) => console.error("[Job PDF] Lỗi:", jobId, e.message)).finally(() => { soJobDangChayNen = Math.max(0, soJobDangChayNen - 1); });
     res.json({
       jobId, tongSoTrang, tongSoLo: cacPhan.length, trangThai: "dang_chay",
       ghiChu: cacPhan.length > 1
