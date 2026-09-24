@@ -1966,7 +1966,13 @@ function fileJob(jobId) {
   const safe = String(jobId).replace(/[^a-zA-Z0-9_-]/g, "");
   return path.join(DATA_DIR_JOBS, `${safe}.json`);
 }
+// Cache job đang chạy trong RAM — status API không 404 trong vài giây đầu
+// trước khi lần ghiJob đầu tiên hoàn tất (route trả jobId ngay, ghi DB sau).
+const jobMemCache = new Map();
+
 async function docJob(jobId) {
+  if (jobMemCache.has(jobId)) return jobMemCache.get(jobId);
+
   // SỬA LỖI THẬT (nguyên nhân xác nhận của lỗi "Job not found" người dùng gặp):
   // trước đây CHỈ lưu file JSON trên đĩa (data/jobs/) — Render free tier có
   // filesystem TẠM THỜI, bị xoá sạch mỗi khi server khởi động lại (redeploy,
@@ -1990,6 +1996,7 @@ async function docJob(jobId) {
   try { return JSON.parse(fs.readFileSync(fileJob(jobId), "utf8")); } catch (e) { return null; }
 }
 async function ghiJob(job) {
+  if (job?.jobId) jobMemCache.set(job.jobId, job);
   if (pgStore && process.env.DATABASE_URL) {
     try {
       await pgStore.ghiStorage("_jobs", job.jobId, job); // object thuần — ghiStorage tự stringify đúng 1 lần
@@ -2207,6 +2214,7 @@ async function xuLyJobPdfLon(jobId, jobBanDau) {
   // cách âm thầm. Lần ghi đầu tiên thật sự diễn ra ngay trong vòng lặp dưới.
   const job = jobBanDau || (await docJob(jobId));
   if (!job) return;
+  if (job.jobId) jobMemCache.set(job.jobId, job);
   const SO_LAN_THU_LO = 2; // đồng bộ với xuLyJobNen — xem giải thích ở đó
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
@@ -2217,12 +2225,35 @@ async function xuLyJobPdfLon(jobId, jobBanDau) {
     let thanhCong = false, loiLanCuoi = "";
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
       try {
-        const contentBlocks = [
-          { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
-          { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
-          { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
-        ];
-        const data = await callUnifiedAI(contentBlocks, "pdfs-2024-09-25", job.provider);
+        if (!lo.pdfBase64) throw new Error("Thiếu pdfBase64 của lô (đã bị xoá sau xử lý hoặc job hỏng) — tải lại file PDF.");
+        // File > ~3MB base64: ưu tiên Files API (né trần 32MB payload Anthropic)
+        const uocByte = Math.floor((lo.pdfBase64.length * 3) / 4);
+        let contentBlocks;
+        let betaHeader = "pdfs-2024-09-25";
+        if (uocByte > 3 * 1024 * 1024 && typeof uploadPdfToFilesApi === "function" && ANTHROPIC_API_KEY) {
+          try {
+            const fileId = await uploadPdfToFilesApi(lo.pdfBase64, `${job.tenFile || "part"}_${i + 1}.pdf`);
+            const fid = typeof fileId === "string" ? fileId : (fileId?.id || fileId?.file_id);
+            if (!fid) throw new Error("Files API không trả file_id");
+            contentBlocks = [
+              { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
+              { type: "document", source: { type: "file", file_id: fid } },
+              { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
+            ];
+            betaHeader = "pdfs-2024-09-25,files-api-2025-04-14";
+          } catch (upErr) {
+            console.warn("[Job PDF] Files API thất bại, fallback base64:", upErr.message);
+            contentBlocks = null;
+          }
+        }
+        if (!contentBlocks) {
+          contentBlocks = [
+            { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
+            { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
+            { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
+          ];
+        }
+        const data = await callUnifiedAI(contentBlocks, betaHeader, job.provider);
         const rawItems = parseRawJsonTuAI(data);
         const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ name: `${job.tenFile || "document.pdf"} (trang ${lo.tuTrang}-${lo.denTrang})` }]);
         lo.items = items;
