@@ -1966,13 +1966,23 @@ function fileJob(jobId) {
   const safe = String(jobId).replace(/[^a-zA-Z0-9_-]/g, "");
   return path.join(DATA_DIR_JOBS, `${safe}.json`);
 }
-// Cache job đang chạy trong RAM — status API không 404 trong vài giây đầu
-// trước khi lần ghiJob đầu tiên hoàn tất (route trả jobId ngay, ghi DB sau).
-const jobMemCache = new Map();
+// SỬA LỖI THẬT (nguyên nhân xác nhận của lỗi "Không tìm thấy job" người dùng
+// vừa gặp — do CHÍNH sửa chữa trước đó gây ra): route /api/analyze-pdf giờ
+// trả lời NGAY LẬP TỨC (đúng, để tránh chờ ghi database nặng làm treo request
+// như bug trước đó) — NHƯNG việc ghi thật vào Postgres lại chạy Ở NỀN, có thể
+// mất vài giây với payload nặng (file đã mã hoá). Nếu điện thoại hỏi trạng
+// thái QUÁ SỚM (trước khi lần ghi nền đó xong), docJob() không tìm thấy gì cả
+// — "Không tìm thấy job", dù job vừa mới tạo giây trước. Sửa bằng bộ nhớ tạm
+// TRONG CHÍNH TIẾN TRÌNH SERVER (không qua mạng, không có độ trễ) — ghi vào
+// đây NGAY LÚC TẠO job (đồng bộ, chắc chắn xong trước khi kịp trả lời điện
+// thoại) — docJob() tra cứu ở đây trước tiên, luôn có ngay lập tức, không còn
+// phụ thuộc tốc độ Postgres nữa. Bộ nhớ tạm bị xoá khi server khởi động lại —
+// khi đó docJob() tự rơi xuống đọc Postgres/file như trước (đã có sẵn cơ chế
+// tự động nối lại job dang dở phía app cho đúng trường hợp này).
+const jobsBoNhoTam = new Map();
 
 async function docJob(jobId) {
-  if (jobMemCache.has(jobId)) return jobMemCache.get(jobId);
-
+  if (jobsBoNhoTam.has(jobId)) return jobsBoNhoTam.get(jobId);
   // SỬA LỖI THẬT (nguyên nhân xác nhận của lỗi "Job not found" người dùng gặp):
   // trước đây CHỈ lưu file JSON trên đĩa (data/jobs/) — Render free tier có
   // filesystem TẠM THỜI, bị xoá sạch mỗi khi server khởi động lại (redeploy,
@@ -1996,7 +2006,7 @@ async function docJob(jobId) {
   try { return JSON.parse(fs.readFileSync(fileJob(jobId), "utf8")); } catch (e) { return null; }
 }
 async function ghiJob(job) {
-  if (job?.jobId) jobMemCache.set(job.jobId, job);
+  jobsBoNhoTam.set(job.jobId, job); // luôn cập nhật bộ nhớ tạm trước, tức thời
   if (pgStore && process.env.DATABASE_URL) {
     try {
       await pgStore.ghiStorage("_jobs", job.jobId, job); // object thuần — ghiStorage tự stringify đúng 1 lần
@@ -2214,7 +2224,6 @@ async function xuLyJobPdfLon(jobId, jobBanDau) {
   // cách âm thầm. Lần ghi đầu tiên thật sự diễn ra ngay trong vòng lặp dưới.
   const job = jobBanDau || (await docJob(jobId));
   if (!job) return;
-  if (job.jobId) jobMemCache.set(job.jobId, job);
   const SO_LAN_THU_LO = 2; // đồng bộ với xuLyJobNen — xem giải thích ở đó
   for (let i = 0; i < job.cacLo.length; i++) {
     const lo = job.cacLo[i];
@@ -2225,35 +2234,12 @@ async function xuLyJobPdfLon(jobId, jobBanDau) {
     let thanhCong = false, loiLanCuoi = "";
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
       try {
-        if (!lo.pdfBase64) throw new Error("Thiếu pdfBase64 của lô (đã bị xoá sau xử lý hoặc job hỏng) — tải lại file PDF.");
-        // File > ~3MB base64: ưu tiên Files API (né trần 32MB payload Anthropic)
-        const uocByte = Math.floor((lo.pdfBase64.length * 3) / 4);
-        let contentBlocks;
-        let betaHeader = "pdfs-2024-09-25";
-        if (uocByte > 3 * 1024 * 1024 && typeof uploadPdfToFilesApi === "function" && ANTHROPIC_API_KEY) {
-          try {
-            const fileId = await uploadPdfToFilesApi(lo.pdfBase64, `${job.tenFile || "part"}_${i + 1}.pdf`);
-            const fid = typeof fileId === "string" ? fileId : (fileId?.id || fileId?.file_id);
-            if (!fid) throw new Error("Files API không trả file_id");
-            contentBlocks = [
-              { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
-              { type: "document", source: { type: "file", file_id: fid } },
-              { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
-            ];
-            betaHeader = "pdfs-2024-09-25,files-api-2025-04-14";
-          } catch (upErr) {
-            console.warn("[Job PDF] Files API thất bại, fallback base64:", upErr.message);
-            contentBlocks = null;
-          }
-        }
-        if (!contentBlocks) {
-          contentBlocks = [
-            { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
-            { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
-            { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
-          ];
-        }
-        const data = await callUnifiedAI(contentBlocks, betaHeader, job.provider);
+        const contentBlocks = [
+          { type: "text", text: `--- Phần ${i + 1}/${job.cacLo.length} của PDF gốc (trang ${lo.tuTrang}-${lo.denTrang}) ---` },
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: lo.pdfBase64 } },
+          { type: "text", text: taoPrompt(job.ghiChuThem, job.danhSachChuan, job.tenCam, job.tenUuTien, job.duToanMauThamChieu) },
+        ];
+        const data = await callUnifiedAI(contentBlocks, "pdfs-2024-09-25", job.provider);
         const rawItems = parseRawJsonTuAI(data);
         const { items, pipelineTrace, drawingModel } = chayPipeline9Buoc(rawItems, 1, [{ name: `${job.tenFile || "document.pdf"} (trang ${lo.tuTrang}-${lo.denTrang})` }]);
         lo.items = items;
@@ -2294,7 +2280,7 @@ async function xuLyJobPdfLon(jobId, jobBanDau) {
   await ghiJob(job);
 }
 
-app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
+async function handleAnalyzePdf(req, res) {
   try {
     const { base64, ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Thiếu base64" });
@@ -2350,7 +2336,52 @@ app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, async (req, res) => {
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
+}
+app.post("/api/analyze-pdf", aiLimiter, batBuocDangNhap, handleAnalyzePdf);
+
+// ============================================================================
+// UPLOAD NHỊ PHÂN — SỬA LỖI THẬT: đường /api/analyze-pdf ở trên bắt buộc trình
+// duyệt phải tự mã hoá TOÀN BỘ file thành base64 (FileReader.readAsDataURL)
+// TRƯỚC KHI gửi — với file vài MB, bước này giữ 2-3 bản sao cùng lúc trong RAM
+// (base64 + chuỗi JSON bọc quanh + bản đang chờ gửi đi), trên điện thoại có
+// thể làm hết bộ nhớ, trình duyệt ÂM THẦM tự đóng/tải lại tab TRƯỚC KHI kịp
+// gửi bất kỳ request nào — khớp chính xác triệu chứng "không ghi log gì cả,
+// như chưa từng có request tới server". Đường nhị phân dưới đây để trình
+// duyệt gửi THẲNG file gốc (không tự mã hoá trước), server mới là nơi mã hoá
+// base64 (RAM server dồi dào hơn máy người dùng rất nhiều, không có rủi ro
+// này). 2 bước, tách khỏi phần dữ liệu nhỏ (JSON) và phần file lớn (nhị phân):
+//   1) POST /api/analyze-file/init  (JSON, nhỏ) — gửi TRƯỚC mọi thứ ngoài file.
+//   2) POST /api/analyze-file/:uploadId  (nhị phân thô) — CHỈ gửi byte file.
+const choUploadNhiPhan = new Map(); // uploadId -> { metadata, taoLuc }
+const UPLOAD_NHI_PHAN_HET_HAN_MS = 10 * 60 * 1000;
+function donDepUploadNhiPhanHetHan() {
+  const now = Date.now();
+  for (const [id, v] of choUploadNhiPhan) if (now - v.taoLuc > UPLOAD_NHI_PHAN_HET_HAN_MS) choUploadNhiPhan.delete(id);
+}
+app.post("/api/analyze-file/init", aiLimiter, batBuocDangNhap, (req, res) => {
+  donDepUploadNhiPhanHetHan();
+  const { ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu, name } = req.body || {};
+  const uploadId = uidBackend("upl");
+  choUploadNhiPhan.set(uploadId, { taoLuc: Date.now(), metadata: { ghiChuThem, danhSachChuan, provider, tenCam, tenUuTien, duToanMauThamChieu, name } });
+  res.json({ uploadId });
 });
+app.post(
+  "/api/analyze-file/:uploadId",
+  aiLimiter,
+  batBuocDangNhap,
+  express.raw({ type: "application/octet-stream", limit: "80mb" }),
+  async (req, res) => {
+    const phien = choUploadNhiPhan.get(req.params.uploadId);
+    if (!phien) return res.status(400).json({ error: "uploadId không tồn tại hoặc đã hết hạn (quá 10 phút chưa gửi file) — gọi lại /init trước." });
+    choUploadNhiPhan.delete(req.params.uploadId);
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ error: "File rỗng hoặc chưa gửi dạng nhị phân đúng (Content-Type phải là application/octet-stream)." });
+    }
+    const base64 = req.body.toString("base64");
+    req.body = { base64, ...phien.metadata };
+    return handleAnalyzePdf(req, res);
+  }
+);
 
 // ============================================================================
 // LƯU TRỮ RIÊNG — thay cho window.storage / localStorage, lưu thật trên server

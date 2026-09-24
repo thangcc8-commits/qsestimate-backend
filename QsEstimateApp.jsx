@@ -1806,13 +1806,16 @@ export default function QsEstimateApp() {
       if (!(pdfEntry.file instanceof Blob) || pdfEntry.file.size === 0) {
         throw new Error('Không lấy được dữ liệu gốc của file PDF này (có thể do đổi thẻ/tải lại trang làm mất dữ liệu tạm). Hãy bấm nút "Chọn file PDF" và tải LẠI đúng file đó lên (không dùng file đã có sẵn trong danh sách cũ), rồi bấm "Bắt đầu đọc AI" ngay sau khi tải xong.');
       }
-      const base64 = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
-        reader.onerror = () => reject(new Error("Không đọc được dữ liệu file PDF"));
-        reader.readAsDataURL(pdfEntry.file);
-      });
-
+      // SỬA LỖI THẬT (nghi vấn cao nhất cho triệu chứng "im lặng hoàn toàn,
+      // không log gì" trên di động): TRƯỚC ĐÂY dùng FileReader.readAsDataURL
+      // để tự mã hoá base64 NGAY TRONG TRÌNH DUYỆT trước khi gửi — với file
+      // vài MB, giữ cùng lúc 2-3 bản sao trong RAM (base64 + JSON bọc quanh +
+      // bản đang chờ gửi) — điện thoại RAM thấp có thể ÂM THẦM giết/tải lại
+      // tab NGAY TẠI BƯỚC NÀY, trước khi có bất kỳ request nào rời khỏi máy —
+      // khớp đúng "log không ghi nhận gì" (Render không thấy vì chưa từng có
+      // request tới). Giờ gửi THẲNG file gốc dạng nhị phân — trình duyệt
+      // không tự mã hoá gì cả, server (RAM dồi dào hơn nhiều) mới là nơi mã
+      // hoá base64.
       let parsed;
       let modelDaDung = null; // model AI đã dùng để đọc — truy vết sau này (mục 25 Versioning)
       // Gọi 1 LẦN, giữ lại cả .danhSach (gửi AI) VÀ .tenToNormId (dùng khớp
@@ -1824,14 +1827,23 @@ export default function QsEstimateApp() {
         // ---- Chế độ backend riêng (ổn định — dùng khi đã có hosting) ----
         let response;
         try {
-          // Timeout 30s — giờ endpoint này CHỈ tạo job rồi trả về ngay (không
-          // còn chờ AI xử lý xong mới trả lời), nên phải rất nhanh; treo lâu
-          // hơn 30s gần như chắc chắn là mạng rớt, không phải đang xử lý.
-          response = await fetchCoTimeout(`${BACKEND_URL}/api/analyze-pdf`, {
+          // Bước 1/2: gửi phần dữ liệu NHỎ (JSON metadata) trước, nhận uploadId.
+          const initRes = await fetchCoTimeout(`${BACKEND_URL}/api/analyze-file/init`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-user-id": getUserId(), ...authHeaders() },
-            body: JSON.stringify({ base64, ghiChuThem, name: pdfEntry.name, danhSachChuan: mauChuanPdf.danhSach, tenCam: activeProject?.tenCam, tenUuTien: activeProject?.tenUuTien, duToanMauThamChieu: layDuToanMauThamChieu(activeProject) }),
-          }, 30000);
+            body: JSON.stringify({ ghiChuThem, name: pdfEntry.name, danhSachChuan: mauChuanPdf.danhSach, tenCam: activeProject?.tenCam, tenUuTien: activeProject?.tenUuTien, duToanMauThamChieu: layDuToanMauThamChieu(activeProject) }),
+          }, 15000);
+          const initData = await initRes.json().catch(() => null);
+          if (!initRes.ok || !initData?.uploadId) throw new Error(initData?.error || `Không khởi tạo được lượt upload (HTTP ${initRes.status})`);
+          // Bước 2/2: gửi THẲNG byte file gốc — không qua FileReader/base64.
+          // Timeout dài hơn hẳn bước 1 vì đây là bước truyền dữ liệu nặng thật,
+          // co giãn theo dung lượng file (mạng di động chậm cần thêm thời gian).
+          const timeoutTaiLen = Math.max(30000, Math.round(pdfEntry.file.size / (150 * 1024)) * 1000); // ước lượng ~150KB/s tối thiểu, sàn 30s
+          response = await fetchCoTimeout(`${BACKEND_URL}/api/analyze-file/${initData.uploadId}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream", "x-user-id": getUserId(), ...authHeaders() },
+            body: pdfEntry.file,
+          }, timeoutTaiLen);
         } catch (netErr) {
           throw new Error(`Không gọi được backend riêng (${netErr.message}). Kiểm tra lại địa chỉ BACKEND_URL trong code và server có đang chạy không.`);
         }
