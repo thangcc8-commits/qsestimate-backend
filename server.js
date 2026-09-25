@@ -2054,7 +2054,7 @@ async function xuLyJobNen(jobId) {
     lo.trangThai = "dang_chay";
     await ghiJob(job);
 
-    let thanhCong = false, loiLanCuoi = "";
+    let thanhCong = false, loiLanCuoi = "", lichSuLoi = [];
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
       try {
         const contentBlocks = [];
@@ -2076,13 +2076,27 @@ async function xuLyJobNen(jobId) {
         ghiNhatKy({ luc: new Date().toISOString(), nguoi: job.nguoi, loai: `Job lô ${i + 1}/${job.cacLo.length}`, ten: job.jobId, ...chiPhi });
         break;
       } catch (e) {
+        // SỬA LỖI THẬT (phát hiện qua câu hỏi thật của người dùng: "sao báo
+        // lỗi mạng mà vẫn tốn tiền?"): TRƯỚC ĐÂY chỉ giữ lại lỗi của LẦN THỬ
+        // CUỐI — nếu lần 1 THỰC RA đã kết nối/được Anthropic xử lý+tính tiền
+        // (chỉ là bước xử lý kết quả sau đó lỗi vì lý do khác), rồi lần 2 mới
+        // gặp lỗi mạng thật, màn hình chỉ hiện đúng lỗi lần 2 — xoá mất bằng
+        // chứng lần 1 đã tốn tiền thật, khiến "lỗi mạng nhưng vẫn mất tiền"
+        // trông vô lý dù thực ra có lý do. Giờ giữ đủ lịch sử MỌI lần thử.
         loiLanCuoi = e.message;
+        lichSuLoi.push(`Lần ${lanThu}: ${e.message}`);
         if (lanThu < SO_LAN_THU_LO) await new Promise((r) => setTimeout(r, 5000 * lanThu)); // chờ 5s, 10s giữa các lần — dài hơn nhiều so với retry nội bộ trong callUnifiedAI, đủ vượt qua gián đoạn mạng dài hơn
       }
     }
     if (!thanhCong) {
       lo.trangThai = "loi";
-      lo.loi = loiLanCuoi;
+      lo.loi = lichSuLoi.length > 1 ? lichSuLoi.join(" | ") : loiLanCuoi;
+      // Ghi lại cả lượt LỖI vào nhật ký — trước đây hàm này KHÔNG hề ghi log
+      // khi lỗi (chỉ ghi khi thành công), nên các lượt lỗi hoàn toàn "vô hình"
+      // trong Nhật ký sử dụng dù Anthropic có thể đã tính tiền cho 1 trong các
+      // lần thử. Không có usd/vnd chính xác (lỗi thì không nhận được "usage"
+      // từ Anthropic) nhưng vẫn hiện diện để không mất dấu vết.
+      ghiNhatKy({ luc: new Date().toISOString(), nguoi: job.nguoi, loai: `Job lô ${i + 1}/${job.cacLo.length} — LỖI (xem chi tiết ở "loi", chi phí thật nếu có xem ở platform.claude.com/settings/usage)`, ten: job.jobId, inputTokens: 0, outputTokens: 0, usd: 0, vnd: 0 });
     }
     await ghiJob(job); // lưu NGAY sau mỗi lô — không mất tiến độ nếu bị gián đoạn
   }
@@ -2231,7 +2245,7 @@ async function xuLyJobPdfLon(jobId, jobBanDau) {
     lo.trangThai = "dang_chay";
     await ghiJob(job);
 
-    let thanhCong = false, loiLanCuoi = "";
+    let thanhCong = false, loiLanCuoi = "", lichSuLoi = [];
     for (let lanThu = 1; lanThu <= SO_LAN_THU_LO; lanThu++) {
       try {
         const contentBlocks = [
@@ -2252,13 +2266,18 @@ async function xuLyJobPdfLon(jobId, jobBanDau) {
         ghiNhatKy({ luc: new Date().toISOString(), nguoi: job.nguoi, loai: `Job PDF phần ${i + 1}/${job.cacLo.length}`, ten: job.jobId, ...chiPhi });
         break;
       } catch (e) {
+        // Xem giải thích đầy đủ ở đúng chỗ tương tự trong xuLyJobNen phía trên
+        // (giữ lịch sử MỌI lần thử, không chỉ lần cuối — trả lời đúng câu hỏi
+        // thật "sao báo lỗi mạng mà vẫn tốn tiền?": có thể 1 lần thử TRƯỚC đã
+        // thực sự kết nối/tốn tiền, chỉ là bị ghi đè mất bởi lỗi của lần sau).
         loiLanCuoi = e.message;
+        lichSuLoi.push(`Lần ${lanThu}: ${e.message}`);
         if (lanThu < SO_LAN_THU_LO) await new Promise((r) => setTimeout(r, 5000 * lanThu));
       }
     }
     if (!thanhCong) {
       lo.trangThai = "loi";
-      lo.loi = loiLanCuoi;
+      lo.loi = lichSuLoi.length > 1 ? lichSuLoi.join(" | ") : loiLanCuoi;
       // Lỗi/timeout vẫn có thể đã bị Anthropic tính tiền (đã gửi = đã tính,
       // không hoàn được) — ghi lại để không mất dấu vết chi phí thật, dù
       // không biết chính xác số tiền (không nhận được "usage" khi lỗi).

@@ -1191,20 +1191,15 @@ export default function QsEstimateApp() {
     const id = uid("pj");
     setProjects((prev) => [...prev, { id, name, groupId, createdAt: new Date().toISOString().slice(0, 10), quanLyPct: 0.08, khacPct: 0.01, loiNhuanPct: 0.12, vatPct: 0.08, khoanThreshold: -0.05, W: 0, L: 0, floors: 1, rooms: 0, wc: 0 }]);
     setActiveProjectId(id);
-    // TỰ ĐỘNG áp dụng mẫu dự toán mặc định khớp đúng nhóm công trình (nếu có)
-    // — không cần bấm thêm bước "Tạo dự án từ mẫu" riêng. Ưu tiên đúng 2 tên
-    // mẫu mặc định ("Nhà phố mặc định"/"Shophouse mặc định"), rơi về mẫu đầu
-    // tiên khớp nhóm nếu chú đã đổi tên. Khối lượng basis="gfa" sẽ TỰ TÍNH LẠI
-    // đúng theo W×L×floors thật của dự án MỚI này — không dùng "dims" mẫu.
-    const tenMacDinh = groupId === "nha-pho" ? "Nhà phố mặc định" : groupId === "shophouse" ? "Shophouse mặc định" : null;
-    const tenMauKhop = (tenMacDinh && boqTemplates[tenMacDinh]) ? tenMacDinh : Object.keys(boqTemplates).find((t) => boqTemplates[t].groupId === groupId);
-    const tpl = tenMauKhop ? boqTemplates[tenMauKhop] : null;
-    if (tpl && tpl.items.length) {
-      setBoqItems((prev) => [...prev, ...tpl.items.map((it) => ({ id: uid("boq"), projectId: id, included: true, ...it }))]);
-      showToast(`Đã tạo dự án "${name}" — có sẵn ${tpl.items.length} dòng dự toán mẫu từ "${tenMauKhop}", đọc bản vẽ để AI tự điền khối lượng thật.`);
-    } else {
-      showToast(`Đã tạo dự án "${name}" — chưa có mẫu dự toán cho nhóm này, thêm hạng mục thủ công.`);
-    }
+    // SỬA THEO YÊU CẦU: BỎ HẲN việc tự động thêm dòng mẫu (basis="gfa"/"floor")
+    // khi tạo dự án mới — trước đây tự thêm 6 dòng có tên nhưng KL=0 (vì công
+    // thức basis chờ "Thông số công trình" của DỰ ÁN MỚI, mặc định W=L=0), gây
+    // hiểu lầm liên tục nhiều lần là "app lỗi" dù đây vốn là tính năng cố ý.
+    // Dự án mới giờ BẮT ĐẦU TRỐNG — chỉ có dòng khi AI đọc bản vẽ (tự động vào
+    // BOQ ngay) hoặc người dùng tự thêm tay. Ai muốn dùng mẫu có sẵn vẫn dùng
+    // được qua đúng nút "Tạo dự án từ mẫu" riêng (lựa chọn rõ ràng, không tự
+    // động ngầm).
+    showToast(`Đã tạo dự án "${name}" — đọc bản vẽ để AI tự điền khối lượng, hoặc thêm hạng mục thủ công.`);
   };
 
   const updateProjectSetting = (field, value) => {
