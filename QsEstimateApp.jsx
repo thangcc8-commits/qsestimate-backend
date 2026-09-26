@@ -2567,7 +2567,40 @@ export default function QsEstimateApp() {
       }
       return { id: uid("boq"), projectId: activeProjectId, normId, qty: r.qty, khoanPrice: null, included: true, category: r.category || "cat-hoanthien", ghiChu: r.note || "", trangThai, sourcePhoto: r.sourcePhoto || "", model: r.model || null, ngayDoc: new Date().toISOString(), evidence_region: r.evidence_region || null, confidenceMatrix: r.confidenceMatrix || null };
     });
+    const boqItemsMoi = [...boqItems, ...newBoqItems];
     setBoqItems((prev) => [...prev, ...newBoqItems]);
+    // THÊM MỚI (theo yêu cầu — lo ngại chính đáng: lỡ tay chuyển tab/chuyển
+    // app khác ngay sau khi vừa đọc xong, trước khi kịp lưu, mất trắng công
+    // sức + tiền vừa đọc): TRƯỚC ĐÂY việc lưu chỉ chạy qua 1 bộ đếm chờ 600ms
+    // dùng chung cho MỌI thay đổi nhỏ (gõ chữ, sửa giá...) — với kết quả AI
+    // vừa đọc (quý giá, tốn tiền thật), 600ms là 1 khoảng hở đủ để mất nếu
+    // trình duyệt di động tự tải lại trang đúng lúc đó. Giờ LƯU NGAY LẬP TỨC
+    // (không chờ) ngay khi vừa thêm xong, độc lập với bộ đếm 600ms kia — có 2
+    // lớp lưu cùng bảo vệ, lớp này ưu tiên tốc độ cho đúng thời điểm rủi ro
+    // nhất.
+    (async () => {
+      try {
+        const payload = JSON.stringify({ projects, activeProjectId, materials, labor, norms, boqItems: boqItemsMoi, changeLog, drawingVersions, boqTemplates, aiResults, vendors, activeVendorId, vendorPrices, revisionSnapshots });
+        await appStorage.set("qsapp-state-v1", payload);
+      } catch (e) { /* lớp lưu debounce 600ms vẫn còn đó làm lưới an toàn thứ 2 */ }
+    })();
+    // THÊM MỚI (lớp bảo vệ thứ 2, độc lập hoàn toàn với server — theo đúng
+    // yêu cầu "phải lưu file khi cần download về"): tự động tải về 1 file
+    // .json nhỏ chứa NGUYÊN VĂN kết quả AI vừa đọc, nằm thẳng trong máy chú —
+    // dù lỡ có chuyện gì xảy ra với app/server, vẫn còn file này để đối chiếu
+    // hoặc nhập tay lại, không phải đọc lại từ đầu (tốn tiền + tốn thời gian).
+    try {
+      const banSaoLuu = { doc_luc: new Date().toISOString(), du_an: activeProject?.name || "", nguon: danhSach[0]?.sourcePhoto || "", so_dong: danhSach.length, hang_muc: danhSach.map((r) => ({ ten: r.name, dvt: r.unit, khoi_luong: r.qty, ghi_chu: r.note })) };
+      const blob = new Blob([JSON.stringify(banSaoLuu, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `sao-luu-doc-AI_${(activeProject?.name || "duan").replace(/[^a-zA-Z0-9]/g, "")}_${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { /* không chặn luồng chính nếu trình duyệt chặn tự tải file */ }
     if (!imLang) {
       showToast(
         `Đã tự động thêm ${danhSach.length} dòng vào BOQ` +
